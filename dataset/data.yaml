@@ -1,0 +1,9 @@
+
+path: /home/luca/Coding/projects/ml-skin-cancer/dataset
+train: images/train
+val: images/val
+test: images/test
+
+# Classes
+nc: 7  # Number of classes in the HAM10000 dataset
+names: ['akiec', 'bcc', 'bkl', 'df', 'mel', 'nv', 'vasc']  # Class names from HAM10000
