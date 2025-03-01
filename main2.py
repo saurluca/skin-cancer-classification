@@ -13,24 +13,29 @@ np.random.seed(42)
 torch.manual_seed(42)
 
 
-
 # Update the paths to match your actual directory structure
 # Assuming the CSV file is in the current directory
 csv_path = "HAM10000_metadata.csv"
 # Update this to the correct path where your subset of images are stored
 # images_path = "data/train/"  # Changed back to your original path
 # path to all images
-all_images_dir_path = "/home/luca/.cache/kagglehub/datasets/kmader/skin-cancer-mnist-ham10000/versions/2/ham10000_images_part_1/"
+# all_images_dir_path = "/home/luca/.cache/kagglehub/datasets/kmader/skin-cancer-mnist-ham10000/versions/2/ham10000_images_part_1/"
+
+# combine images from all 4 folders
+base_path = (
+    "/home/luca/.cache/kagglehub/datasets/kmader/skin-cancer-mnist-ham10000/versions/2/"
+)
+folders = [
+    "ham10000_images_part_1",
+    "ham10000_images_part_2",
+    "HAM10000_images_part_1",
+    "HAM10000_images_part_2",
+]
 
 
 # Check if the CSV file exists
 if not os.path.exists(csv_path):
     print(f"Error: CSV file not found at {csv_path}")
-    exit(1)
-
-# Check if the image directory exists
-if not os.path.exists(all_images_dir_path):
-    print(f"Error: Image directory not found at {all_images_dir_path}")
     exit(1)
 
 df = pd.read_csv(csv_path)
@@ -45,39 +50,46 @@ if "dx" in df.columns:
     print(f"Diagnosis classes: {diagnosis_to_idx}")
 
 
-def load_images(image_ids, image_dir):
+# Function to load images from multiple folders
+def load_images_from_folders(image_ids, base_path, folders):
     images = []
-    missing_images = []
-    found_images = []
+    found_image_ids = []
+    missing_image_ids = []
 
     for image_id in image_ids:
-        image_path = os.path.join(image_dir, f"{image_id}.jpg")
+        found = False
+        # Try each folder until the image is found
+        for folder in folders:
+            image_path = os.path.join(base_path, folder, f"{image_id}.jpg")
+            if os.path.exists(image_path):
+                image = Image.open(image_path)
+                images.append(image)
+                found_image_ids.append(image_id)
+                found = True
+                break
 
-        # Check if the image file exists
-        if os.path.exists(image_path):
-            image = Image.open(image_path)
-            images.append(image)
-            found_images.append(image_id)
-        else:
-            missing_images.append(image_id)
+        if not found:
+            missing_image_ids.append(image_id)
 
     # Print information about missing and found images
     print(f"Total images in CSV: {len(image_ids)}")
-    print(f"Found: {len(found_images)} images")
-    print(f"Missing: {len(missing_images)} images")
+    print(f"Found: {len(found_image_ids)} images")
+    print(f"Missing: {len(missing_image_ids)} images")
 
-    if found_images:
-        print(f"First few found: {found_images[:5]}")
+    if found_image_ids:
+        print(f"First few found: {found_image_ids[:5]}")
 
-    if missing_images:
-        print(f"First few missing: {missing_images[:5]}")
+    if missing_image_ids:
+        print(f"First few missing: {missing_image_ids[:5]}")
 
-    return images, found_images
+    return images, found_image_ids
 
 
-# Try to load the images
-print(f"Attempting to load images from {all_images_dir_path}")
-images, found_image_ids = load_images(df["image_id"].tolist(), all_images_dir_path)
+# Try to load the images from all folders
+print(f"Attempting to load images from multiple folders in {base_path}")
+images, found_image_ids = load_images_from_folders(
+    df["image_id"].tolist(), base_path, folders
+)
 
 print(f"Successfully loaded {len(images)} images")
 
@@ -116,11 +128,42 @@ transform = transforms.Compose(
     ]
 )
 
+# Add data augmentation for minority classes
+transform_minority = transforms.Compose(
+    [
+        transforms.Resize((32, 32)),
+        transforms.RandomHorizontalFlip(),
+        transforms.RandomRotation(20),
+        transforms.ColorJitter(brightness=0.1, contrast=0.1, saturation=0.1),
+        transforms.Resize((28, 28)),
+        transforms.ToTensor(),
+        transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5)),
+    ]
+)
+
 # Create image paths and labels
-image_paths = [
-    os.path.join(all_images_dir_path, f"{img_id}.jpg") for img_id in filtered_df["image_id"]
-]
+image_paths = []
+for img_id in filtered_df["image_id"]:
+    # Try to find the image in each folder
+    found = False
+    for folder in folders:
+        path = os.path.join(base_path, folder, f"{img_id}.jpg")
+        if os.path.exists(path):
+            image_paths.append(path)
+            found = True
+            break
+    if not found:
+        print(f"Warning: Could not find image {img_id} in any folder")
+
 labels = [diagnosis_to_idx[diagnosis] for diagnosis in filtered_df["dx"]]
+
+# Ensure we have the same number of paths and labels
+if len(image_paths) != len(labels):
+    print(
+        f"Warning: Number of image paths ({len(image_paths)}) doesn't match number of labels ({len(labels)})"
+    )
+    # Keep only the labels for which we have images
+    labels = labels[: len(image_paths)]
 
 # Create the dataset
 dataset = SkinLesionDataset(image_paths, labels, transform=transform)
@@ -139,22 +182,42 @@ train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
 test_loader = DataLoader(test_dataset, batch_size=batch_size, shuffle=False)
 
 
-class NeuralNetwork(nn.Module):
+# Enhanced CNN model with more dropout layers
+class CNNModel(nn.Module):
     def __init__(self, num_classes=len(diagnosis_to_idx)):
         super().__init__()
-        self.flatten = nn.Flatten()
-        self.linear_relu_stack = nn.Sequential(
-            nn.Linear(28 * 28 * 3, 512),  # 3 channels for RGB
+        self.conv_layers = nn.Sequential(
+            nn.Conv2d(3, 32, kernel_size=3, padding=1),
+            nn.BatchNorm2d(32),
             nn.ReLU(),
-            nn.Linear(512, 512),
+            nn.Dropout2d(0.1),  # Add dropout to convolutional layers
+            nn.MaxPool2d(2),
+            nn.Conv2d(32, 64, kernel_size=3, padding=1),
+            nn.BatchNorm2d(64),
             nn.ReLU(),
-            nn.Linear(512, num_classes),
+            nn.Dropout2d(0.2),  # Increase dropout rate in deeper layers
+            nn.MaxPool2d(2),
+            nn.Conv2d(64, 128, kernel_size=3, padding=1),
+            nn.BatchNorm2d(128),
+            nn.ReLU(),
+            nn.Dropout2d(0.3),  # Even higher dropout rate
+            nn.MaxPool2d(2),
+        )
+        self.fc_layers = nn.Sequential(
+            nn.Linear(128 * 3 * 3, 512),
+            nn.ReLU(),
+            nn.Dropout(0.5),  # High dropout for fully connected layers
+            nn.Linear(512, 256),
+            nn.ReLU(),
+            nn.Dropout(0.4),  # Additional fully connected layer with dropout
+            nn.Linear(256, num_classes),
         )
 
     def forward(self, x):
-        x = self.flatten(x)
-        logits = self.linear_relu_stack(x)
-        return logits
+        x = self.conv_layers(x)
+        x = x.view(x.size(0), -1)
+        x = self.fc_layers(x)
+        return x
 
 
 device = (
@@ -164,12 +227,27 @@ device = (
 )
 print(f"Using {device} device", "\n")
 
-model = NeuralNetwork().to(device)
+model = CNNModel().to(device)
 print(model)
 
-# Define loss function and optimizer
-loss_fn = nn.CrossEntropyLoss()
-optimizer = optim.SGD(model.parameters(), lr=1e-3)
+# Calculate class weights based on class frequencies
+class_counts = filtered_df["dx"].value_counts()
+total_samples = len(filtered_df)
+class_weights = torch.tensor(
+    [
+        (total_samples / class_counts[idx_to_diagnosis[i]])
+        for i in range(len(diagnosis_to_idx))
+    ],
+    dtype=torch.float,
+).to(device)
+
+loss_fn = nn.CrossEntropyLoss(weight=class_weights)
+optimizer = optim.Adam(
+    model.parameters(), lr=1e-3, weight_decay=1e-5
+)  # Use Adam with weight decay
+scheduler = optim.lr_scheduler.ReduceLROnPlateau(
+    optimizer, mode="min", factor=0.5, patience=2
+)
 
 
 # Training function
@@ -204,6 +282,9 @@ def train(dataloader, model, loss_fn, optimizer, epoch):
     print(
         f"Epoch {epoch + 1}: Avg loss: {epoch_loss:.4f}, Accuracy: {100 * epoch_acc:.2f}%"
     )
+
+    # Update the learning rate scheduler
+    scheduler.step(epoch_loss)
 
     return epoch_loss, epoch_acc
 
@@ -243,7 +324,7 @@ def test(dataloader, model, loss_fn):
 
 
 # Train the model
-epochs = 5
+epochs = 10   # Train for more epochs
 train_losses = []
 train_accs = []
 
