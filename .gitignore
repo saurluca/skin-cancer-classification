@@ -1,0 +1,14 @@
+/data
+/models
+/logs
+/plots
+/results
+/checkpoints
+/dataset
+/.venv
+/mlruns
+/runs
+skin_lesion_model.pth
+
+dataset
+data
