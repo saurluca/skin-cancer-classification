@@ -1,0 +1,6 @@
+artifact_location: file:///home/luca/Coding/projects/ml-skin-cancer/mlruns/517447168040077570
+creation_time: 1740862031516
+experiment_id: '517447168040077570'
+last_update_time: 1740862031516
+lifecycle_stage: active
+name: skin-lesion-classification

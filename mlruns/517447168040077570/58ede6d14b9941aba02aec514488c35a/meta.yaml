@@ -1,0 +1,15 @@
+artifact_uri: file:///home/luca/Coding/projects/ml-skin-cancer/mlruns/517447168040077570/58ede6d14b9941aba02aec514488c35a/artifacts
+end_time: 1740862305374
+entry_point_name: ''
+experiment_id: '517447168040077570'
+lifecycle_stage: active
+run_id: 58ede6d14b9941aba02aec514488c35a
+run_name: cnn-model
+run_uuid: 58ede6d14b9941aba02aec514488c35a
+source_name: ''
+source_type: 4
+source_version: ''
+start_time: 1740862104985
+status: 3
+tags: []
+user_id: luca
