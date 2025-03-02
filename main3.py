@@ -22,21 +22,24 @@ from pathlib import Path
 class ModelConfig:
     # Data parameters
     batch_size: int = 32
-    image_size: tuple = (64, 48)  # image is rectangular with og size 600x450
+    image_size: tuple = (64, 48)  # Increased resolution for better feature extraction
     train_split: float = 0.8
 
     # Model parameters
-    conv_channels: list = (32, 64, 128)
-    fc_features: list = (512, 256)
-    dropout_rates_conv: list = (0.1, 0.2, 0.3)
-    dropout_rates_fc: list = (0.5, 0.4)
+    conv_channels: list = (32, 64, 128, 256)  # Added another conv layer
+    fc_features: list = (512, 256, 128)  # Added another FC layer
+    dropout_rates_conv: list = (0.1, 0.15, 0.2, 0.25)  # More gradual dropout increase
+    dropout_rates_fc: list = (0.4, 0.3, 0.2)  # Decreasing dropout in FC layers
 
     # Training parameters
-    learning_rate: float = 1e-3
-    weight_decay: float = 1e-5
-    epochs: int = 10
-    scheduler_factor: float = 0.5
-    scheduler_patience: int = 2
+    learning_rate: float = 5e-4  # Slightly lower learning rate
+    weight_decay: float = 2e-5  # Increased regularization
+    epochs: int = 15  # More epochs for better convergence
+    scheduler_factor: float = 0.7  # Less aggressive LR reduction
+    scheduler_patience: int = 3  # More patience before reducing LR
+
+    # Class weight parameters
+    class_weight_power: float = 0.3  # Use this to control weight intensity in the sampler
 
     # Paths
     model_save_path: str = "skin_lesion_model.pth"
@@ -211,9 +214,10 @@ def create_class_balanced_sampler(dataset):
         if label not in class_counts:
             class_counts[label] = 0
         class_counts[label] += 1
-
-    # Calculate weights for each sample
-    weights = [1.0 / class_counts[all_labels[i]] for i in range(len(all_labels))]
+        
+    print("class_counts", class_counts)
+    # Calculate weights for each sample with reduced balancing effect
+    weights = [1.0 / (class_counts[all_labels[i]] ** config.class_weight_power) for i in range(len(all_labels))]
     weights = torch.DoubleTensor(weights)
 
     # Create a sampler that samples with replacement according to the weights
@@ -307,6 +311,8 @@ class CNNModel(nn.Module):
         x = self.fc_layers(x)
         return x
 
+
+# Define a secont model
 
 device = (
     torch.accelerator.current_accelerator().type
@@ -488,7 +494,7 @@ def train_model(model, train_loader, test_loader, optimizer, loss_fn, epochs):
         train_accs.append(epoch_acc)
 
         # Only evaluate on test set every 5 epochs or on the final epoch
-        if (t + 1) % 5 == 0 or t == epochs - 1:
+        if (t + 1) % 3 == 0 or t == epochs - 1:
             test_loss, test_acc = test(test_loader, model, loss_fn, epoch=t)
             test_losses.append(test_loss)
             test_accs.append(test_acc)
@@ -573,6 +579,7 @@ with mlflow.start_run(run_name=config.run_name):
             "train_split": config.train_split,
             "num_classes": len(diagnosis_to_idx),
             "class_mapping": diagnosis_to_idx,
+            "class_weight_power": config.class_weight_power,
         }
     )
 
