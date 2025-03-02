@@ -21,3 +21,4 @@ pretrained_skin_lesion_model.pth
 *.jpeg
 *.gif
 *.bmp
+*.csv
