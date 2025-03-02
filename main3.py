@@ -36,7 +36,7 @@ class ModelConfig:
     # Training parameters
     learning_rate: float = 5e-4  # Slightly lower learning rate
     weight_decay: float = 2e-5  # Increased regularization
-    epochs: int = 3  # More epochs for better convergence
+    epochs: int = 1  # More epochs for better convergence
     scheduler_factor: float = 0.7  # Less aggressive LR reduction
     scheduler_patience: int = 3  # More patience before reducing LR
 
@@ -83,8 +83,6 @@ def load_images(df, diagnosis_to_idx, config):
     return image_paths, labels
 
 
-# Define transformations
-transform = transforms.Compose(
 # Update the SkinLesionDataset class to handle different transforms for different classes
 class SkinLesionDataset(Dataset):
     def __init__(self, images, labels, transform, transform_minority, diagnosis_to_idx):
@@ -204,22 +202,18 @@ class CNNModel(nn.Module):
         return x
 
 
-# Training function
-def train(dataloader, model, loss_fn, optimizer, epoch, device, epochs, scheduler):
-    size = len(dataloader.dataset)
+# Update the train function to include scheduler parameter
+def train(dataloader, model, loss_fn, optimizer, epoch, device, scheduler=None):
     model.train()
-    running_loss = 0.0
+    size = len(dataloader.dataset)
+    num_batches = len(dataloader)
+    train_loss = 0.0
     correct = 0
 
-    # Create progress bar for training batches
-    progress_bar = tqdm(
-        dataloader,
-        desc=f"Epoch {epoch + 1}/{epochs} [Train]",
-        leave=False,
-        unit="batch",
-    )
+    # Create progress bar
+    progress_bar = tqdm(dataloader, desc=f"Epoch {epoch + 1}", unit="batch")
 
-    for X, y in progress_bar:
+    for batch, (X, y) in enumerate(progress_bar):
         X, y = X.to(device), y.to(device)
 
         # Compute prediction error
@@ -231,32 +225,37 @@ def train(dataloader, model, loss_fn, optimizer, epoch, device, epochs, schedule
         loss.backward()
         optimizer.step()
 
-        running_loss += loss.item()
-        correct += (pred.argmax(1) == y).type(torch.float).sum().item()
-
-        # Update progress bar with current loss and accuracy
+        # Update metrics
+        train_loss += loss.item()
         batch_loss = loss.item()
-        batch_acc = (pred.argmax(1) == y).type(torch.float).mean().item()
+        _, predicted = torch.max(pred, 1)
+        batch_correct = (predicted == y).sum().item()
+        correct += batch_correct
+
+        # Update progress bar
+        batch_acc = batch_correct / len(y)
         progress_bar.set_postfix(
             loss=f"{batch_loss:.4f}", accuracy=f"{100 * batch_acc:.2f}%"
         )
 
-    # Calculate epoch statistics
-    epoch_loss = running_loss / len(dataloader)
-    epoch_acc = correct / size
-    print(
-        f"Epoch {epoch + 1}: Avg loss: {epoch_loss:.4f}, Accuracy: {100 * epoch_acc:.2f}%"
-    )
+    # Calculate epoch metrics
+    train_loss /= num_batches
+    accuracy = correct / size
+
+    # Update scheduler if provided
+    if scheduler is not None:
+        scheduler.step(train_loss)
 
     # Log metrics to MLflow
     mlflow.log_metrics(
-        {"train_loss": epoch_loss, "train_accuracy": epoch_acc}, step=epoch
+        {"train_loss": train_loss, "train_accuracy": accuracy}, step=epoch
     )
 
-    # Update the learning rate scheduler
-    scheduler.step(epoch_loss)
+    print(
+        f"Train Error: \n Accuracy: {(100 * accuracy):>0.1f}%, Avg loss: {train_loss:>8f} \n"
+    )
 
-    return epoch_loss, epoch_acc
+    return train_loss, accuracy
 
 
 # Testing function
@@ -306,11 +305,25 @@ def test(
 
     # Print detailed classification report
     print("Classification Report:")
-    target_names = [idx_to_diagnosis[i] for i in range(len(diagnosis_to_idx))]
-    report = classification_report(
-        all_labels, all_preds, target_names=target_names, output_dict=True
-    )
-    print(classification_report(all_labels, all_preds, target_names=target_names))
+    if idx_to_diagnosis and diagnosis_to_idx:
+        target_names = [idx_to_diagnosis[i] for i in range(len(diagnosis_to_idx))]
+        report = classification_report(
+            all_labels,
+            all_preds,
+            target_names=target_names,
+            output_dict=True,
+            zero_division=0,
+        )
+        print(
+            classification_report(
+                all_labels, all_preds, target_names=target_names, zero_division=0
+            )
+        )
+    else:
+        report = classification_report(
+            all_labels, all_preds, output_dict=True, zero_division=0
+        )
+        print(classification_report(all_labels, all_preds, zero_division=0))
 
     # Log metrics to MLflow
     if epoch is not None:
@@ -475,7 +488,7 @@ class PretrainedModel(nn.Module):
         return self.base_model(x)
 
 
-# Define a function to train and evaluate both models
+# Update the train_and_compare_models function to pass scheduler to train
 def train_and_compare_models(
     model1,
     model2,
@@ -489,6 +502,7 @@ def train_and_compare_models(
     epochs,
     device,
     idx_to_diagnosis,
+    diagnosis_to_idx,
 ):
     # Dictionary to store results
     results = {
@@ -520,7 +534,7 @@ def train_and_compare_models(
         # Train and evaluate custom CNN
         print("Training custom CNN model:")
         epoch_loss, epoch_acc = train(
-            train_loader, model1, loss_fn, optimizer1, t, device
+            train_loader, model1, loss_fn, optimizer1, t, device, scheduler1
         )
         results["custom_cnn"]["train_losses"].append(epoch_loss)
         results["custom_cnn"]["train_accs"].append(epoch_acc)
@@ -528,7 +542,7 @@ def train_and_compare_models(
         # Train and evaluate pre-trained model
         print("\nTraining pre-trained model:")
         epoch_loss, epoch_acc = train(
-            train_loader, model2, loss_fn, optimizer2, t, device
+            train_loader, model2, loss_fn, optimizer2, t, device, scheduler2
         )
         results["pretrained"]["train_losses"].append(epoch_loss)
         results["pretrained"]["train_accs"].append(epoch_acc)
@@ -543,6 +557,7 @@ def train_and_compare_models(
                 epoch=t,
                 device=device,
                 idx_to_diagnosis=idx_to_diagnosis,
+                diagnosis_to_idx=diagnosis_to_idx,
             )
             results["custom_cnn"]["test_losses"].append(test_loss)
             results["custom_cnn"]["test_accs"].append(test_acc)
@@ -556,14 +571,11 @@ def train_and_compare_models(
                 epoch=t,
                 device=device,
                 idx_to_diagnosis=idx_to_diagnosis,
+                diagnosis_to_idx=diagnosis_to_idx,
             )
             results["pretrained"]["test_losses"].append(test_loss)
             results["pretrained"]["test_accs"].append(test_acc)
             results["pretrained"]["test_epochs"].append(t)
-
-        # Update schedulers
-        scheduler1.step(results["custom_cnn"]["train_losses"][-1])
-        scheduler2.step(results["pretrained"]["train_losses"][-1])
 
     return results
 
@@ -633,7 +645,7 @@ def plot_model_comparison(results):
 
 
 # Define the save_as_onnx function
-def save_as_onnx(model, input_shape, base_filename="skin_lesion_model"):
+def save_as_onnx(model, input_shape, device, base_filename="skin_lesion_model"):
     # Create a timestamp for unique filename
     timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
     onnx_filename = f"{base_filename}_{timestamp}.onnx"
@@ -845,6 +857,7 @@ def main():
             config.epochs,
             device,
             idx_to_diagnosis,
+            diagnosis_to_idx,
         )
 
         # Plot model comparison
@@ -872,6 +885,7 @@ def main():
         onnx_path = save_as_onnx(
             better_model_obj,
             config.image_size,
+            device,
             base_filename=f"skin_lesion_{better_model}",
         )
 
