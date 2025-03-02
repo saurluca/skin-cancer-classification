@@ -50,12 +50,6 @@ class ModelConfig:
     csv_path: str = "data/HAM10000_metadata.csv"  # Updated path
     images_dir: str = "data/images"  # New path for images
 
-    # Alternative CSV paths for different formats
-    csv_8_8_L_path: str = "data/hmnist_8_8_L.csv"
-    csv_8_8_RGB_path: str = "data/hmnist_8_8_RGB.csv"
-    csv_28_28_L_path: str = "data/hmnist_28_28_L.csv"
-    csv_28_28_RGB_path: str = "data/hmnist_28_28_RGB.csv"
-
     # MLflow parameters
     experiment_name: str = "skin-lesion-classification"
     run_name: str = "cnn-model"
@@ -73,11 +67,6 @@ mlflow.set_experiment(config.experiment_name)
 np.random.seed(42)
 torch.manual_seed(42)
 
-# Check if the CSV file exists
-if not os.path.exists(config.csv_path):
-    print(f"Error: CSV file not found at {config.csv_path}")
-    exit(1)
-
 df = pd.read_csv(config.csv_path)
 
 # Create a mapping from diagnosis to numerical label
@@ -90,49 +79,7 @@ if "dx" in df.columns:
     print(f"Diagnosis classes: {diagnosis_to_idx}")
 
 
-# Updated function to load images from a single directory
-def load_images_from_directory(image_ids, images_dir):
-    images = []
-    found_image_ids = []
-    missing_image_ids = []
-
-    for image_id in image_ids:
-        image_path = os.path.join(images_dir, f"{image_id}.jpg")
-        if os.path.exists(image_path):
-            image = Image.open(image_path)
-            images.append(image)
-            found_image_ids.append(image_id)
-        else:
-            missing_image_ids.append(image_id)
-
-    # Print information about missing and found images
-    print(f"Total images in CSV: {len(image_ids)}")
-    print(f"Found: {len(found_image_ids)} images")
-    print(f"Missing: {len(missing_image_ids)} images")
-
-    if found_image_ids:
-        print(f"First few found: {found_image_ids[:5]}")
-
-    if missing_image_ids:
-        print(f"First few missing: {missing_image_ids[:5]}")
-
-    return images, found_image_ids
-
-
-# Try to load the images from the images directory
-print(f"Attempting to load images from directory: {config.images_dir}")
-images, found_image_ids = load_images_from_directory(
-    df["image_id"].tolist(), config.images_dir
-)
-
-print(f"Successfully loaded {len(images)} images")
-
-# Filter the dataframe to include only the images we found
-filtered_df = df[df["image_id"].isin(found_image_ids)]
-print(f"Filtered dataframe contains {len(filtered_df)} rows")
-
-
-# Update the get_image_path function to use the new directory structure
+# Simplify the image loading function since we only have one directory now
 def get_image_path(img_id):
     """Get the path to an image file."""
     path = os.path.join(config.images_dir, f"{img_id}.jpg")
@@ -142,17 +89,32 @@ def get_image_path(img_id):
 
 
 # Create image paths and labels for the dataset
-image_paths = []
-labels = []
+def load_images(df, diagnosis_to_idx):
+    image_paths = []
+    labels = []
 
-for idx, row in filtered_df.iterrows():
-    img_id = row["image_id"]
-    path = get_image_path(img_id)
-    if path:
-        image_paths.append(path)
-        labels.append(diagnosis_to_idx[row["dx"]])
+    for idx, row in df.iterrows():
+        img_id = row["image_id"]
+        path = get_image_path(img_id)
+        if path:
+            image_paths.append(path)
+            labels.append(diagnosis_to_idx[row["dx"]])
 
-print(f"Created {len(image_paths)} image paths and labels")
+    print(f"Found {len(image_paths)} valid images out of {len(df)} entries")
+    return image_paths, labels
+
+
+# Try to load the images from the images directory
+print(f"Attempting to load images from directory: {config.images_dir}")
+images, labels = load_images(df, diagnosis_to_idx)
+
+print(f"Successfully loaded {len(images)} images")
+
+# Filter the dataframe to include only the images we found
+filtered_df = df[
+    df["image_id"].isin([os.path.splitext(os.path.basename(img))[0] for img in images])
+]
+print(f"Filtered dataframe contains {len(filtered_df)} rows")
 
 
 # Create a custom dataset class
@@ -199,7 +161,7 @@ transform_minority = transforms.Compose(
 )
 
 # Create the dataset
-dataset = SkinLesionDataset(image_paths, labels, transform=transform)
+dataset = SkinLesionDataset(images, labels, transform=transform)
 
 # Split into train and test sets
 train_size = int(config.train_split * len(dataset))
@@ -210,6 +172,33 @@ print(f"Training set size: {len(train_dataset)}")
 print(f"Test set size: {len(test_dataset)}")
 
 print("Creating balanced sampler for training set")
+
+
+# Add the missing create_class_balanced_sampler function
+def create_class_balanced_sampler(dataset):
+    """Create a sampler that balances class distribution during training."""
+    # Get all labels in the dataset
+    targets = [dataset[i][1] for i in range(len(dataset))]
+
+    # Count samples per class
+    class_counts = torch.bincount(torch.tensor(targets))
+    print(f"Class distribution: {class_counts}")
+
+    # Calculate weights for each sample
+    weights = 1.0 / class_counts[targets]
+
+    # Apply power to control weight intensity
+    weights = weights**config.class_weight_power
+
+    # Create and return the sampler
+    sampler = torch.utils.data.WeightedRandomSampler(
+        weights=weights, num_samples=len(weights), replacement=True
+    )
+
+    print(f"Created balanced sampler with {len(weights)} weights")
+    return sampler
+
+
 # Create a balanced sampler for the training set
 train_sampler = create_class_balanced_sampler(train_dataset)
 
