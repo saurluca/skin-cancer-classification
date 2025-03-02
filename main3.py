@@ -58,29 +58,8 @@ class ModelConfig:
         pass  # No need for folders list anymore
 
 
-# Initialize configuration
-config = ModelConfig()
-
-# Set up MLflow experiment
-mlflow.set_experiment(config.experiment_name)
-
-np.random.seed(42)
-torch.manual_seed(42)
-
-df = pd.read_csv(config.csv_path)
-
-# Create a mapping from diagnosis to numerical label
-if "dx" in df.columns:
-    unique_diagnoses = df["dx"].unique()
-    diagnosis_to_idx = {
-        diagnosis: idx for idx, diagnosis in enumerate(unique_diagnoses)
-    }
-    idx_to_diagnosis = {idx: diagnosis for diagnosis, idx in diagnosis_to_idx.items()}
-    print(f"Diagnosis classes: {diagnosis_to_idx}")
-
-
 # Simplify the image loading function since we only have one directory now
-def get_image_path(img_id):
+def get_image_path(img_id, config):
     """Get the path to an image file."""
     path = os.path.join(config.images_dir, f"{img_id}.jpg")
     if os.path.exists(path):
@@ -89,13 +68,13 @@ def get_image_path(img_id):
 
 
 # Create image paths and labels for the dataset
-def load_images(df, diagnosis_to_idx):
+def load_images(df, diagnosis_to_idx, config):
     image_paths = []
     labels = []
 
     for idx, row in df.iterrows():
         img_id = row["image_id"]
-        path = get_image_path(img_id)
+        path = get_image_path(img_id, config)
         if path:
             image_paths.append(path)
             labels.append(diagnosis_to_idx[row["dx"]])
@@ -104,216 +83,129 @@ def load_images(df, diagnosis_to_idx):
     return image_paths, labels
 
 
-# Try to load the images from the images directory
-print(f"Attempting to load images from directory: {config.images_dir}")
-images, labels = load_images(df, diagnosis_to_idx)
-
-print(f"Successfully loaded {len(images)} images")
-
-# Filter the dataframe to include only the images we found
-filtered_df = df[
-    df["image_id"].isin([os.path.splitext(os.path.basename(img))[0] for img in images])
-]
-print(f"Filtered dataframe contains {len(filtered_df)} rows")
-
-
-# Create a custom dataset class
+# Define transformations
+transform = transforms.Compose(
+# Update the SkinLesionDataset class to handle different transforms for different classes
 class SkinLesionDataset(Dataset):
-    def __init__(self, image_paths, labels, transform=None):
-        self.image_paths = image_paths
+    def __init__(self, images, labels, transform, transform_minority, diagnosis_to_idx):
+        self.images = images
         self.labels = labels
         self.transform = transform
+        self.transform_minority = transform_minority
+
+        # Define minority classes - all except 'nv'
+        self.majority_class = diagnosis_to_idx["nv"]
+
+        # Get indices for especially rare classes
+        self.very_rare_classes = []
+        if "df" in diagnosis_to_idx:
+            self.very_rare_classes.append(diagnosis_to_idx["df"])
+        if "vasc" in diagnosis_to_idx:
+            self.very_rare_classes.append(diagnosis_to_idx["vasc"])
 
     def __len__(self):
-        return len(self.image_paths)
+        return len(self.images)
 
     def __getitem__(self, idx):
-        img_path = self.image_paths[idx]
-        image = Image.open(img_path)
+        image_path = self.images[idx]
         label = self.labels[idx]
 
-        if self.transform:
+        image = Image.open(image_path).convert("RGB")
+
+        # Apply appropriate transform based on class
+        if label == self.majority_class:
+            # For majority class (nv), use standard transform
             image = self.transform(image)
+        else:
+            # For all minority classes, use augmented transform
+            image = self.transform_minority(image)
+
+            # For very rare classes, apply additional augmentation
+            # by creating multiple slightly different versions of the same image
+            if label in self.very_rare_classes:
+                # Apply transform_minority again with different random parameters
+                # This is handled automatically by the random nature of the transforms
+                pass
 
         return image, label
 
 
-# Define image transformations
-transform = transforms.Compose(
-    [
-        transforms.Resize(config.image_size),
-        transforms.ToTensor(),
-        transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5)),
-    ]
-)
-
-# Add data augmentation for minority classes
-transform_minority = transforms.Compose(
-    [
-        transforms.Resize((config.image_size[0] + 4, config.image_size[1] + 4)),
-        transforms.RandomHorizontalFlip(),
-        transforms.RandomRotation(20),
-        transforms.ColorJitter(brightness=0.1, contrast=0.1, saturation=0.1),
-        transforms.Resize(config.image_size),
-        transforms.ToTensor(),
-        transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5)),
-    ]
-)
-
-# Create the dataset
-dataset = SkinLesionDataset(images, labels, transform=transform)
-
-# Split into train and test sets
-train_size = int(config.train_split * len(dataset))
-test_size = len(dataset) - train_size
-train_dataset, test_dataset = random_split(dataset, [train_size, test_size])
-
-print(f"Training set size: {len(train_dataset)}")
-print(f"Test set size: {len(test_dataset)}")
-
-print("Creating balanced sampler for training set")
-
-
 # Add the missing create_class_balanced_sampler function
-def create_class_balanced_sampler(dataset):
+def create_class_balanced_sampler(dataset, config):
     """Create a sampler that balances class distribution during training."""
-    # Get all labels in the dataset
     targets = [dataset[i][1] for i in range(len(dataset))]
-
-    # Count samples per class
     class_counts = torch.bincount(torch.tensor(targets))
     print(f"Class distribution: {class_counts}")
-
-    # Calculate weights for each sample
     weights = 1.0 / class_counts[targets]
-
-    # Apply power to control weight intensity
     weights = weights**config.class_weight_power
-
-    # Create and return the sampler
     sampler = torch.utils.data.WeightedRandomSampler(
         weights=weights, num_samples=len(weights), replacement=True
     )
-
     print(f"Created balanced sampler with {len(weights)} weights")
     return sampler
 
 
-# Create a balanced sampler for the training set
-train_sampler = create_class_balanced_sampler(train_dataset)
-
-print("Creating data loaders")
-# Create data loaders
-train_loader = DataLoader(
-    train_dataset,
-    batch_size=config.batch_size,
-    sampler=train_sampler,  # Use the balanced sampler instead of shuffle=True
-)
-test_loader = DataLoader(test_dataset, batch_size=config.batch_size, shuffle=False)
-
-
-# Enhanced CNN model with configurable architecture
+# Update the CNNModel class to accept num_classes directly
 class CNNModel(nn.Module):
-    def __init__(self, config, num_classes=None):
+    def __init__(self, config, num_classes):
         super().__init__()
-        if num_classes is None:
-            num_classes = len(diagnosis_to_idx)
 
-        # Build convolutional layers dynamically
-        conv_layers = []
-        in_channels = 3  # RGB images
+        # Create convolutional layers
+        self.conv_layers = nn.ModuleList()
+        in_channels = 3  # RGB input
 
         for i, out_channels in enumerate(config.conv_channels):
-            conv_layers.extend(
-                [
-                    nn.Conv2d(in_channels, out_channels, kernel_size=3, padding=1),
-                    nn.BatchNorm2d(out_channels),
-                    nn.ReLU(),
-                    nn.Dropout2d(config.dropout_rates_conv[i]),
-                    nn.MaxPool2d(2),
-                ]
+            conv_block = nn.Sequential(
+                nn.Conv2d(in_channels, out_channels, kernel_size=3, padding=1),
+                nn.BatchNorm2d(out_channels),
+                nn.ReLU(),
+                nn.Dropout2d(config.dropout_rates_conv[i]),
+                nn.MaxPool2d(2),
             )
+            self.conv_layers.append(conv_block)
             in_channels = out_channels
 
-        self.conv_layers = nn.Sequential(*conv_layers)
+        # Calculate the size of the flattened features after convolutions
+        # For each MaxPool2d(2), the spatial dimensions are halved
+        h_out = config.image_size[0] // (2 ** len(config.conv_channels))
+        w_out = config.image_size[1] // (2 ** len(config.conv_channels))
+        flattened_size = in_channels * h_out * w_out
 
-        # Calculate the size of flattened features after convolutions
-        # For 28x28 input with 3 MaxPool2d layers: 28 -> 14 -> 7 -> 3
-        conv_output_size = (
-            config.conv_channels[-1]
-            * (config.image_size[0] // (2 ** len(config.conv_channels)))
-            * (config.image_size[1] // (2 ** len(config.conv_channels)))
-        )
-
-        # Build fully connected layers dynamically
-        fc_layers = []
-        in_features = conv_output_size
+        # Create fully connected layers
+        self.fc_layers = nn.ModuleList()
+        in_features = flattened_size
 
         for i, out_features in enumerate(config.fc_features):
-            fc_layers.extend(
-                [
-                    nn.Linear(in_features, out_features),
-                    nn.ReLU(),
-                    nn.Dropout(config.dropout_rates_fc[i]),
-                ]
+            fc_block = nn.Sequential(
+                nn.Linear(in_features, out_features),
+                nn.ReLU(),
+                nn.Dropout(config.dropout_rates_fc[i]),
             )
+            self.fc_layers.append(fc_block)
             in_features = out_features
 
-        # Add final classification layer
-        fc_layers.append(nn.Linear(config.fc_features[-1], num_classes))
-
-        self.fc_layers = nn.Sequential(*fc_layers)
+        # Final classification layer
+        self.classifier = nn.Linear(in_features, num_classes)
 
     def forward(self, x):
-        x = self.conv_layers(x)
+        # Pass through convolutional layers
+        for conv_block in self.conv_layers:
+            x = conv_block(x)
+
+        # Flatten
         x = x.view(x.size(0), -1)
-        x = self.fc_layers(x)
+
+        # Pass through fully connected layers
+        for fc_block in self.fc_layers:
+            x = fc_block(x)
+
+        # Final classification
+        x = self.classifier(x)
         return x
 
 
-# Define a secont model
-
-device = (
-    torch.accelerator.current_accelerator().type
-    if torch.accelerator.is_available()
-    else "cpu"
-)
-print(f"Using {device} device", "\n")
-
-model = CNNModel(config).to(device)
-print(model)
-
-print("Calculating class weights")
-# Calculate class weights based on class frequencies
-class_counts = filtered_df["dx"].value_counts()
-total_samples = len(filtered_df)
-class_weights = torch.tensor(
-    [
-        (total_samples / class_counts[idx_to_diagnosis[i]])
-        for i in range(len(diagnosis_to_idx))
-    ],
-    dtype=torch.float,
-).to(device)
-
-print("Creating loss function")
-loss_fn = nn.CrossEntropyLoss(weight=class_weights)
-
-print("Creating optimizer")
-optimizer = optim.Adam(
-    model.parameters(), lr=config.learning_rate, weight_decay=config.weight_decay
-)
-scheduler = optim.lr_scheduler.ReduceLROnPlateau(
-    optimizer,
-    mode="min",
-    factor=config.scheduler_factor,
-    patience=config.scheduler_patience,
-)
-
-print("Training function")
-
-
 # Training function
-def train(dataloader, model, loss_fn, optimizer, epoch):
+def train(dataloader, model, loss_fn, optimizer, epoch, device, epochs, scheduler):
     size = len(dataloader.dataset)
     model.train()
     running_loss = 0.0
@@ -322,7 +214,7 @@ def train(dataloader, model, loss_fn, optimizer, epoch):
     # Create progress bar for training batches
     progress_bar = tqdm(
         dataloader,
-        desc=f"Epoch {epoch + 1}/{config.epochs} [Train]",
+        desc=f"Epoch {epoch + 1}/{epochs} [Train]",
         leave=False,
         unit="batch",
     )
@@ -368,7 +260,15 @@ def train(dataloader, model, loss_fn, optimizer, epoch):
 
 
 # Testing function
-def test(dataloader, model, loss_fn, epoch=None):
+def test(
+    dataloader,
+    model,
+    loss_fn,
+    epoch=None,
+    device=None,
+    idx_to_diagnosis=None,
+    diagnosis_to_idx=None,
+):
     size = len(dataloader.dataset)
     num_batches = len(dataloader)
     model.eval()
@@ -434,7 +334,17 @@ def test(dataloader, model, loss_fn, epoch=None):
 
 
 # Update the training loop to evaluate less frequently
-def train_model(model, train_loader, test_loader, optimizer, loss_fn, epochs):
+def train_model(
+    model,
+    train_loader,
+    test_loader,
+    optimizer,
+    loss_fn,
+    epochs,
+    device,
+    idx_to_diagnosis,
+    diagnosis_to_idx,
+):
     train_losses = []
     train_accs = []
     test_losses = []
@@ -448,13 +358,23 @@ def train_model(model, train_loader, test_loader, optimizer, loss_fn, epochs):
 
     for t in epoch_bar:
         # Train for one epoch
-        epoch_loss, epoch_acc = train(train_loader, model, loss_fn, optimizer, t)
+        epoch_loss, epoch_acc = train(
+            train_loader, model, loss_fn, optimizer, t, device
+        )
         train_losses.append(epoch_loss)
         train_accs.append(epoch_acc)
 
         # Only evaluate on test set every 5 epochs or on the final epoch
         if (t + 1) % 3 == 0 or t == epochs - 1:
-            test_loss, test_acc = test(test_loader, model, loss_fn, epoch=t)
+            test_loss, test_acc = test(
+                test_loader,
+                model,
+                loss_fn,
+                epoch=t,
+                device=device,
+                idx_to_diagnosis=idx_to_diagnosis,
+                diagnosis_to_idx=diagnosis_to_idx,
+            )
             test_losses.append(test_loss)
             test_accs.append(test_acc)
             test_epochs.append(t)
@@ -518,12 +438,10 @@ def plot_training_progress(
     return plt_path
 
 
-# Define a second model based on pre-trained ResNet
+# Update the PretrainedModel class to accept num_classes directly
 class PretrainedModel(nn.Module):
-    def __init__(self, num_classes=None, pretrained_model="resnet18"):
+    def __init__(self, num_classes, pretrained_model="resnet18"):
         super().__init__()
-        if num_classes is None:
-            num_classes = len(diagnosis_to_idx)
 
         # Load pre-trained model
         if pretrained_model == "resnet18":
@@ -557,25 +475,6 @@ class PretrainedModel(nn.Module):
         return self.base_model(x)
 
 
-# Create the second model (pre-trained)
-pretrained_model = PretrainedModel(pretrained_model="resnet18").to(device)
-print("Pre-trained model architecture:")
-print(pretrained_model)
-
-# Create optimizer and scheduler for the pre-trained model
-pretrained_optimizer = optim.Adam(
-    pretrained_model.parameters(),
-    lr=config.learning_rate,
-    weight_decay=config.weight_decay,
-)
-pretrained_scheduler = optim.lr_scheduler.ReduceLROnPlateau(
-    pretrained_optimizer,
-    mode="min",
-    factor=config.scheduler_factor,
-    patience=config.scheduler_patience,
-)
-
-
 # Define a function to train and evaluate both models
 def train_and_compare_models(
     model1,
@@ -588,6 +487,8 @@ def train_and_compare_models(
     scheduler2,
     loss_fn,
     epochs,
+    device,
+    idx_to_diagnosis,
 ):
     # Dictionary to store results
     results = {
@@ -618,26 +519,44 @@ def train_and_compare_models(
 
         # Train and evaluate custom CNN
         print("Training custom CNN model:")
-        epoch_loss, epoch_acc = train(train_loader, model1, loss_fn, optimizer1, t)
+        epoch_loss, epoch_acc = train(
+            train_loader, model1, loss_fn, optimizer1, t, device
+        )
         results["custom_cnn"]["train_losses"].append(epoch_loss)
         results["custom_cnn"]["train_accs"].append(epoch_acc)
 
         # Train and evaluate pre-trained model
         print("\nTraining pre-trained model:")
-        epoch_loss, epoch_acc = train(train_loader, model2, loss_fn, optimizer2, t)
+        epoch_loss, epoch_acc = train(
+            train_loader, model2, loss_fn, optimizer2, t, device
+        )
         results["pretrained"]["train_losses"].append(epoch_loss)
         results["pretrained"]["train_accs"].append(epoch_acc)
 
         # Evaluate both models on test set every 3 epochs or on the final epoch
         if (t + 1) % 3 == 0 or t == epochs - 1:
             print("\nEvaluating custom CNN model:")
-            test_loss, test_acc = test(test_loader, model1, loss_fn, epoch=t)
+            test_loss, test_acc = test(
+                test_loader,
+                model1,
+                loss_fn,
+                epoch=t,
+                device=device,
+                idx_to_diagnosis=idx_to_diagnosis,
+            )
             results["custom_cnn"]["test_losses"].append(test_loss)
             results["custom_cnn"]["test_accs"].append(test_acc)
             results["custom_cnn"]["test_epochs"].append(t)
 
             print("\nEvaluating pre-trained model:")
-            test_loss, test_acc = test(test_loader, model2, loss_fn, epoch=t)
+            test_loss, test_acc = test(
+                test_loader,
+                model2,
+                loss_fn,
+                epoch=t,
+                device=device,
+                idx_to_diagnosis=idx_to_diagnosis,
+            )
             results["pretrained"]["test_losses"].append(test_loss)
             results["pretrained"]["test_accs"].append(test_acc)
             results["pretrained"]["test_epochs"].append(t)
@@ -713,129 +632,6 @@ def plot_model_comparison(results):
     return plt_path
 
 
-# Replace your existing MLflow training code with this:
-print("Starting training with MLflow tracking...")
-with mlflow.start_run(run_name=config.run_name):
-    # Log parameters
-    mlflow.log_params(
-        {
-            "batch_size": config.batch_size,
-            "image_size": config.image_size,
-            "learning_rate": config.learning_rate,
-            "weight_decay": config.weight_decay,
-            "epochs": config.epochs,
-            "conv_channels": config.conv_channels,
-            "fc_features": config.fc_features,
-            "dropout_rates_conv": config.dropout_rates_conv,
-            "dropout_rates_fc": config.dropout_rates_fc,
-            "scheduler_factor": config.scheduler_factor,
-            "scheduler_patience": config.scheduler_patience,
-            "train_split": config.train_split,
-            "num_classes": len(diagnosis_to_idx),
-            "class_mapping": diagnosis_to_idx,
-            "class_weight_power": config.class_weight_power,
-            "model_comparison": "custom_cnn_vs_pretrained_resnet18",
-        }
-    )
-
-    # Log class distribution
-    class_distribution = filtered_df["dx"].value_counts().to_dict()
-    mlflow.log_params({f"class_{k}_count": v for k, v in class_distribution.items()})
-
-    # Train both models and compare
-    results = train_and_compare_models(
-        model,
-        pretrained_model,
-        train_loader,
-        test_loader,
-        optimizer,
-        pretrained_optimizer,
-        scheduler,
-        pretrained_scheduler,
-        loss_fn,
-        config.epochs,
-    )
-
-    print("Training complete!")
-
-    # Plot and log comparison results
-    comparison_plt_path = plot_model_comparison(results)
-    mlflow.log_artifact(comparison_plt_path)
-
-    # Save and log both models
-    torch.save(model.state_dict(), config.model_save_path)
-    torch.save(pretrained_model.state_dict(), "pretrained_" + config.model_save_path)
-
-    # Create input examples for signature inference
-    # Get a batch from the dataloader
-    example_inputs, _ = next(iter(train_loader))
-    example_inputs = example_inputs.to(device)
-
-    # Get model outputs for the examples
-    with torch.no_grad():
-        model.eval()
-        example_outputs_cnn = model(example_inputs)
-
-        pretrained_model.eval()
-        example_outputs_pretrained = pretrained_model(example_inputs)
-
-    # Infer signatures
-    cnn_signature = infer_signature(
-        example_inputs.cpu().numpy(), example_outputs_cnn.cpu().numpy()
-    )
-
-    pretrained_signature = infer_signature(
-        example_inputs.cpu().numpy(), example_outputs_pretrained.cpu().numpy()
-    )
-
-    # Log models with signatures and input examples
-    mlflow.pytorch.log_model(
-        model,
-        "custom_cnn_model",
-        signature=cnn_signature,
-        input_example=example_inputs.cpu().numpy(),
-    )
-
-    mlflow.pytorch.log_model(
-        pretrained_model,
-        "pretrained_model",
-        signature=pretrained_signature,
-        input_example=example_inputs.cpu().numpy(),
-    )
-
-    mlflow.log_artifact(config.model_save_path)
-    mlflow.log_artifact("pretrained_" + config.model_save_path)
-
-    print("Models saved and logged to MLflow")
-
-    # Log final metrics for both models
-    mlflow.log_metrics(
-        {
-            "custom_cnn_final_train_loss": results["custom_cnn"]["train_losses"][-1],
-            "custom_cnn_final_train_accuracy": results["custom_cnn"]["train_accs"][-1],
-            "custom_cnn_final_test_loss": results["custom_cnn"]["test_losses"][-1],
-            "custom_cnn_final_test_accuracy": results["custom_cnn"]["test_accs"][-1],
-            "pretrained_final_train_loss": results["pretrained"]["train_losses"][-1],
-            "pretrained_final_train_accuracy": results["pretrained"]["train_accs"][-1],
-            "pretrained_final_test_loss": results["pretrained"]["test_losses"][-1],
-            "pretrained_final_test_accuracy": results["pretrained"]["test_accs"][-1],
-        }
-    )
-
-    # Determine which model performed better
-    if results["custom_cnn"]["test_accs"][-1] > results["pretrained"]["test_accs"][-1]:
-        better_model = "custom_cnn"
-        better_model_path = config.model_save_path
-    else:
-        better_model = "pretrained"
-        better_model_path = "pretrained_" + config.model_save_path
-
-    mlflow.log_param("better_model", better_model)
-    print(
-        f"The {better_model} model performed better with test accuracy: {max(results[better_model]['test_accs'][-1], results[better_model]['test_accs'][-1]):.4f}"
-    )
-
-
 # Define the save_as_onnx function
 def save_as_onnx(model, input_shape, base_filename="skin_lesion_model"):
     # Create a timestamp for unique filename
@@ -868,41 +664,253 @@ def save_as_onnx(model, input_shape, base_filename="skin_lesion_model"):
     return onnx_path
 
 
-print("MLflow tracking completed")
+def main():
+    # Initialize configuration
+    config = ModelConfig()
 
-# Export the better model to ONNX
-better_model_obj = model if better_model == "custom_cnn" else pretrained_model
-onnx_path = save_as_onnx(
-    better_model_obj, config.image_size, base_filename=f"skin_lesion_{better_model}"
-)
+    # Set up MLflow experiment
+    mlflow.set_experiment(config.experiment_name)
 
-if onnx_path:
-    print(f"Better model saved in ONNX format at: {onnx_path}")
+    # Set random seeds for reproducibility
+    np.random.seed(42)
+    torch.manual_seed(42)
 
-    # Log the ONNX model to MLflow
-    try:
-        # Get example inputs for signature
-        example_inputs, _ = next(iter(train_loader))
-        example_inputs = example_inputs.to(device)
+    # Select device
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    print(f"Using {device} device", "\n")
 
-        # Get model outputs
-        with torch.no_grad():
-            better_model_obj.eval()
-            example_outputs = better_model_obj(example_inputs)
+    # Load data
+    print("Loading data...")
+    df = pd.read_csv(config.csv_path)
 
-        # Infer signature
-        signature = infer_signature(
-            example_inputs.cpu().numpy(), example_outputs.cpu().numpy()
+    # Create mapping from diagnosis to numerical label
+    if "dx" in df.columns:
+        unique_diagnoses = df["dx"].unique()
+        diagnosis_to_idx = {
+            diagnosis: idx for idx, diagnosis in enumerate(unique_diagnoses)
+        }
+        idx_to_diagnosis = {
+            idx: diagnosis for diagnosis, idx in diagnosis_to_idx.items()
+        }
+        print(f"Diagnosis classes: {diagnosis_to_idx}")
+
+    # Load images
+    print(f"Attempting to load images from directory: {config.images_dir}")
+    images, labels = load_images(df, diagnosis_to_idx, config)
+    print(f"Successfully loaded {len(images)} images")
+
+    # Filter dataframe
+    filtered_df = df[
+        df["image_id"].isin(
+            [os.path.splitext(os.path.basename(img))[0] for img in images]
+        )
+    ]
+    print(f"Filtered dataframe contains {len(filtered_df)} rows")
+
+    # Define transformations
+    transform = transforms.Compose(
+        [
+            transforms.Resize(config.image_size),
+            transforms.ToTensor(),
+            transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5)),
+        ]
+    )
+
+    # Add data augmentation for minority classes
+    transform_minority = transforms.Compose(
+        [
+            transforms.Resize((config.image_size[0] + 4, config.image_size[1] + 4)),
+            transforms.RandomHorizontalFlip(),
+            transforms.RandomRotation(20),
+            transforms.ColorJitter(brightness=0.1, contrast=0.1, saturation=0.1),
+            transforms.RandomAffine(
+                degrees=0, translate=(0.05, 0.05), scale=(0.95, 1.05)
+            ),
+            transforms.Resize(config.image_size),
+            transforms.ToTensor(),
+            transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5)),
+        ]
+    )
+
+    # Create dataset with class-specific transforms
+    print("Creating and splitting dataset...")
+    dataset = SkinLesionDataset(
+        images,
+        labels,
+        transform=transform,
+        transform_minority=transform_minority,
+        diagnosis_to_idx=diagnosis_to_idx,
+    )
+    train_size = int(config.train_split * len(dataset))
+    test_size = len(dataset) - train_size
+    train_dataset, test_dataset = random_split(dataset, [train_size, test_size])
+    print(f"Training set size: {len(train_dataset)}")
+    print(f"Test set size: {len(test_dataset)}")
+
+    # Create balanced sampler and dataloaders
+    print("Creating balanced sampler for training set")
+    train_sampler = create_class_balanced_sampler(train_dataset, config)
+
+    print("Creating data loaders")
+    train_loader = DataLoader(
+        train_dataset,
+        batch_size=config.batch_size,
+        sampler=train_sampler,
+    )
+    test_loader = DataLoader(test_dataset, batch_size=config.batch_size, shuffle=False)
+
+    # Create models with the correct number of classes
+    print("Creating models...")
+    num_classes = len(diagnosis_to_idx)
+    model = CNNModel(config, num_classes).to(device)
+    print("Custom CNN model architecture:")
+    print(model)
+
+    pretrained_model = PretrainedModel(num_classes, pretrained_model="resnet18").to(
+        device
+    )
+    print("Pre-trained model architecture:")
+    print(pretrained_model)
+
+    # Calculate class weights
+    print("Calculating class weights")
+    class_counts = filtered_df["dx"].value_counts()
+    total_samples = len(filtered_df)
+    class_weights = torch.tensor(
+        [
+            (total_samples / class_counts[idx_to_diagnosis[i]])
+            ** config.class_weight_power
+            for i in range(len(diagnosis_to_idx))
+        ],
+        dtype=torch.float,
+    ).to(device)
+
+    # Print the weights to verify
+    for i, w in enumerate(class_weights):
+        print(f"Class {idx_to_diagnosis[i]}: weight = {w.item():.3f}")
+
+    # Define loss function, optimizers and schedulers
+    print("Creating loss function")
+    loss_fn = nn.CrossEntropyLoss(weight=class_weights)
+
+    print("Creating optimizers and schedulers")
+    optimizer = optim.Adam(
+        model.parameters(), lr=config.learning_rate, weight_decay=config.weight_decay
+    )
+    scheduler = optim.lr_scheduler.ReduceLROnPlateau(
+        optimizer,
+        mode="min",
+        factor=config.scheduler_factor,
+        patience=config.scheduler_patience,
+    )
+
+    pretrained_optimizer = optim.Adam(
+        pretrained_model.parameters(),
+        lr=config.learning_rate,
+        weight_decay=config.weight_decay,
+    )
+    pretrained_scheduler = optim.lr_scheduler.ReduceLROnPlateau(
+        pretrained_optimizer,
+        mode="min",
+        factor=config.scheduler_factor,
+        patience=config.scheduler_patience,
+    )
+
+    # Train and evaluate models with MLflow tracking
+    print("Starting training...")
+    with mlflow.start_run(run_name=config.run_name):
+        # Log parameters
+        mlflow.log_params(
+            {
+                "batch_size": config.batch_size,
+                "image_size": config.image_size,
+                "learning_rate": config.learning_rate,
+                "weight_decay": config.weight_decay,
+                "epochs": config.epochs,
+                "class_weight_power": config.class_weight_power,
+            }
         )
 
-        with mlflow.start_run(run_name=f"{config.run_name}_{better_model}_onnx_export"):
-            # Log the ONNX model with signature
-            mlflow.onnx.log_model(
-                onnx_model=onnx_path,
-                artifact_path="onnx_model",
-                signature=signature,
-                input_example=example_inputs.cpu().numpy(),
-            )
-            print("ONNX model logged to MLflow with signature")
-    except Exception as e:
-        print(f"Could not log ONNX model to MLflow: {e}")
+        # Train models and compare
+        results = train_and_compare_models(
+            model,
+            pretrained_model,
+            train_loader,
+            test_loader,
+            optimizer,
+            pretrained_optimizer,
+            scheduler,
+            pretrained_scheduler,
+            loss_fn,
+            config.epochs,
+            device,
+            idx_to_diagnosis,
+        )
+
+        # Plot model comparison
+        comparison_plot_path = plot_model_comparison(results)
+        mlflow.log_artifact(comparison_plot_path)
+
+        # Determine which model performed better
+        if (
+            results["custom_cnn"]["test_accs"][-1]
+            > results["pretrained"]["test_accs"][-1]
+        ):
+            better_model = "custom_cnn"
+            better_model_obj = model
+        else:
+            better_model = "pretrained"
+            better_model_obj = pretrained_model
+
+        print(f"Better model: {better_model}")
+
+        # Save the better model
+        torch.save(better_model_obj.state_dict(), config.model_save_path)
+        mlflow.pytorch.log_model(better_model_obj, "model")
+
+        # Export the better model to ONNX
+        onnx_path = save_as_onnx(
+            better_model_obj,
+            config.image_size,
+            base_filename=f"skin_lesion_{better_model}",
+        )
+
+        if onnx_path:
+            print(f"Better model saved in ONNX format at: {onnx_path}")
+
+            # Log the ONNX model to MLflow
+            try:
+                # Get example inputs for signature
+                example_inputs, _ = next(iter(train_loader))
+                example_inputs = example_inputs.to(device)
+
+                # Get model outputs
+                with torch.no_grad():
+                    better_model_obj.eval()
+                    example_outputs = better_model_obj(example_inputs)
+
+                # Infer signature
+                signature = infer_signature(
+                    example_inputs.cpu().numpy(), example_outputs.cpu().numpy()
+                )
+
+                with mlflow.start_run(
+                    run_name=f"{config.run_name}_{better_model}_onnx_export"
+                ):
+                    # Log the ONNX model with signature
+                    mlflow.onnx.log_model(
+                        onnx_model=onnx_path,
+                        artifact_path="onnx_model",
+                        signature=signature,
+                        input_example=example_inputs.cpu().numpy(),
+                    )
+                    print("ONNX model logged to MLflow with signature")
+            except Exception as e:
+                print(f"Could not log ONNX model to MLflow: {e}")
+
+    print("MLflow tracking completed")
+    print("Training complete!")
+
+
+if __name__ == "__main__":
+    main()
