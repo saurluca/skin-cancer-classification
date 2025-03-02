@@ -14,15 +14,17 @@ from tqdm.auto import tqdm
 import mlflow
 import mlflow.pytorch
 import torch.onnx
+import torchvision.models as models
 import datetime
 from pathlib import Path
+from mlflow.models.signature import infer_signature
 
 
 @dataclass
 class ModelConfig:
     # Data parameters
     batch_size: int = 32
-    image_size: tuple = (64, 48)  # Increased resolution for better feature extraction
+    image_size: tuple = (28, 28)  # Increased resolution for better feature extraction
     train_split: float = 0.8
 
     # Model parameters
@@ -34,31 +36,32 @@ class ModelConfig:
     # Training parameters
     learning_rate: float = 5e-4  # Slightly lower learning rate
     weight_decay: float = 2e-5  # Increased regularization
-    epochs: int = 15  # More epochs for better convergence
+    epochs: int = 3  # More epochs for better convergence
     scheduler_factor: float = 0.7  # Less aggressive LR reduction
     scheduler_patience: int = 3  # More patience before reducing LR
 
     # Class weight parameters
-    class_weight_power: float = 0.3  # Use this to control weight intensity in the sampler
+    class_weight_power: float = (
+        0.3  # Use this to control weight intensity in the sampler
+    )
 
     # Paths
     model_save_path: str = "skin_lesion_model.pth"
-    csv_path: str = "HAM10000_metadata.csv"
-    base_path: str = "/home/luca/.cache/kagglehub/datasets/kmader/skin-cancer-mnist-ham10000/versions/2/"
-    folders: list = None
+    csv_path: str = "data/HAM10000_metadata.csv"  # Updated path
+    images_dir: str = "data/images"  # New path for images
+
+    # Alternative CSV paths for different formats
+    csv_8_8_L_path: str = "data/hmnist_8_8_L.csv"
+    csv_8_8_RGB_path: str = "data/hmnist_8_8_RGB.csv"
+    csv_28_28_L_path: str = "data/hmnist_28_28_L.csv"
+    csv_28_28_RGB_path: str = "data/hmnist_28_28_RGB.csv"
 
     # MLflow parameters
     experiment_name: str = "skin-lesion-classification"
     run_name: str = "cnn-model"
 
     def __post_init__(self):
-        if self.folders is None:
-            self.folders = [
-                "ham10000_images_part_1",
-                "ham10000_images_part_2",
-                "HAM10000_images_part_1",
-                "HAM10000_images_part_2",
-            ]
+        pass  # No need for folders list anymore
 
 
 # Initialize configuration
@@ -87,25 +90,19 @@ if "dx" in df.columns:
     print(f"Diagnosis classes: {diagnosis_to_idx}")
 
 
-# Function to load images from multiple folders
-def load_images_from_folders(image_ids, base_path, folders):
+# Updated function to load images from a single directory
+def load_images_from_directory(image_ids, images_dir):
     images = []
     found_image_ids = []
     missing_image_ids = []
 
     for image_id in image_ids:
-        found = False
-        # Try each folder until the image is found
-        for folder in folders:
-            image_path = os.path.join(base_path, folder, f"{image_id}.jpg")
-            if os.path.exists(image_path):
-                image = Image.open(image_path)
-                images.append(image)
-                found_image_ids.append(image_id)
-                found = True
-                break
-
-        if not found:
+        image_path = os.path.join(images_dir, f"{image_id}.jpg")
+        if os.path.exists(image_path):
+            image = Image.open(image_path)
+            images.append(image)
+            found_image_ids.append(image_id)
+        else:
             missing_image_ids.append(image_id)
 
     # Print information about missing and found images
@@ -122,10 +119,10 @@ def load_images_from_folders(image_ids, base_path, folders):
     return images, found_image_ids
 
 
-# Try to load the images from all folders
-print(f"Attempting to load images from multiple folders in {config.base_path}")
-images, found_image_ids = load_images_from_folders(
-    df["image_id"].tolist(), config.base_path, config.folders
+# Try to load the images from the images directory
+print(f"Attempting to load images from directory: {config.images_dir}")
+images, found_image_ids = load_images_from_directory(
+    df["image_id"].tolist(), config.images_dir
 )
 
 print(f"Successfully loaded {len(images)} images")
@@ -133,6 +130,29 @@ print(f"Successfully loaded {len(images)} images")
 # Filter the dataframe to include only the images we found
 filtered_df = df[df["image_id"].isin(found_image_ids)]
 print(f"Filtered dataframe contains {len(filtered_df)} rows")
+
+
+# Update the get_image_path function to use the new directory structure
+def get_image_path(img_id):
+    """Get the path to an image file."""
+    path = os.path.join(config.images_dir, f"{img_id}.jpg")
+    if os.path.exists(path):
+        return path
+    return None
+
+
+# Create image paths and labels for the dataset
+image_paths = []
+labels = []
+
+for idx, row in filtered_df.iterrows():
+    img_id = row["image_id"]
+    path = get_image_path(img_id)
+    if path:
+        image_paths.append(path)
+        labels.append(diagnosis_to_idx[row["dx"]])
+
+print(f"Created {len(image_paths)} image paths and labels")
 
 
 # Create a custom dataset class
@@ -177,56 +197,6 @@ transform_minority = transforms.Compose(
         transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5)),
     ]
 )
-
-# Create image paths and labels
-image_paths = []
-for img_id in filtered_df["image_id"]:
-    # Try to find the image in each folder
-    found = False
-    for folder in config.folders:
-        path = os.path.join(config.base_path, folder, f"{img_id}.jpg")
-        if os.path.exists(path):
-            image_paths.append(path)
-            found = True
-            break
-    if not found:
-        print(f"Warning: Could not find image {img_id} in any folder")
-
-labels = [diagnosis_to_idx[diagnosis] for diagnosis in filtered_df["dx"]]
-
-# Ensure we have the same number of paths and labels
-if len(image_paths) != len(labels):
-    print(
-        f"Warning: Number of image paths ({len(image_paths)}) doesn't match number of labels ({len(labels)})"
-    )
-    # Keep only the labels for which we have images
-    labels = labels[: len(image_paths)]
-
-
-# Create a class-balanced sampler to handle imbalanced classes
-def create_class_balanced_sampler(dataset):
-    # Get all labels from the dataset
-    all_labels = [dataset[i][1] for i in range(len(dataset))]
-
-    # Count occurrences of each class
-    class_counts = {}
-    for label in all_labels:
-        if label not in class_counts:
-            class_counts[label] = 0
-        class_counts[label] += 1
-        
-    print("class_counts", class_counts)
-    # Calculate weights for each sample with reduced balancing effect
-    weights = [1.0 / (class_counts[all_labels[i]] ** config.class_weight_power) for i in range(len(all_labels))]
-    weights = torch.DoubleTensor(weights)
-
-    # Create a sampler that samples with replacement according to the weights
-    sampler = torch.utils.data.WeightedRandomSampler(
-        weights, len(weights), replacement=True
-    )
-
-    return sampler
-
 
 # Create the dataset
 dataset = SkinLesionDataset(image_paths, labels, transform=transform)
@@ -559,7 +529,202 @@ def plot_training_progress(
     return plt_path
 
 
-# Update the MLflow run to use the modified training function
+# Define a second model based on pre-trained ResNet
+class PretrainedModel(nn.Module):
+    def __init__(self, num_classes=None, pretrained_model="resnet18"):
+        super().__init__()
+        if num_classes is None:
+            num_classes = len(diagnosis_to_idx)
+
+        # Load pre-trained model
+        if pretrained_model == "resnet18":
+            self.base_model = models.resnet18(weights="IMAGENET1K_V1")
+        elif pretrained_model == "resnet50":
+            self.base_model = models.resnet50(weights="IMAGENET1K_V1")
+        elif pretrained_model == "efficientnet_b0":
+            self.base_model = models.efficientnet_b0(weights="IMAGENET1K_V1")
+        else:
+            raise ValueError(f"Unsupported model: {pretrained_model}")
+
+        # Freeze early layers to prevent overfitting
+        for param in list(self.base_model.parameters())[
+            :-20
+        ]:  # Freeze all but last few layers
+            param.requires_grad = False
+
+        # Replace the final fully connected layer
+        if pretrained_model.startswith("resnet"):
+            num_ftrs = self.base_model.fc.in_features
+            self.base_model.fc = nn.Sequential(
+                nn.Dropout(0.3), nn.Linear(num_ftrs, num_classes)
+            )
+        elif pretrained_model.startswith("efficientnet"):
+            num_ftrs = self.base_model.classifier[1].in_features
+            self.base_model.classifier = nn.Sequential(
+                nn.Dropout(0.3), nn.Linear(num_ftrs, num_classes)
+            )
+
+    def forward(self, x):
+        return self.base_model(x)
+
+
+# Create the second model (pre-trained)
+pretrained_model = PretrainedModel(pretrained_model="resnet18").to(device)
+print("Pre-trained model architecture:")
+print(pretrained_model)
+
+# Create optimizer and scheduler for the pre-trained model
+pretrained_optimizer = optim.Adam(
+    pretrained_model.parameters(),
+    lr=config.learning_rate,
+    weight_decay=config.weight_decay,
+)
+pretrained_scheduler = optim.lr_scheduler.ReduceLROnPlateau(
+    pretrained_optimizer,
+    mode="min",
+    factor=config.scheduler_factor,
+    patience=config.scheduler_patience,
+)
+
+
+# Define a function to train and evaluate both models
+def train_and_compare_models(
+    model1,
+    model2,
+    train_loader,
+    test_loader,
+    optimizer1,
+    optimizer2,
+    scheduler1,
+    scheduler2,
+    loss_fn,
+    epochs,
+):
+    # Dictionary to store results
+    results = {
+        "custom_cnn": {
+            "train_losses": [],
+            "train_accs": [],
+            "test_losses": [],
+            "test_accs": [],
+            "test_epochs": [],
+        },
+        "pretrained": {
+            "train_losses": [],
+            "train_accs": [],
+            "test_losses": [],
+            "test_accs": [],
+            "test_epochs": [],
+        },
+    }
+
+    print("\n" + "=" * 50)
+    print("Starting training of both models...")
+    print("=" * 50 + "\n")
+
+    # Train both models for the specified number of epochs
+    for t in range(epochs):
+        print(f"\nEpoch {t + 1}/{epochs}")
+        print("-" * 30)
+
+        # Train and evaluate custom CNN
+        print("Training custom CNN model:")
+        epoch_loss, epoch_acc = train(train_loader, model1, loss_fn, optimizer1, t)
+        results["custom_cnn"]["train_losses"].append(epoch_loss)
+        results["custom_cnn"]["train_accs"].append(epoch_acc)
+
+        # Train and evaluate pre-trained model
+        print("\nTraining pre-trained model:")
+        epoch_loss, epoch_acc = train(train_loader, model2, loss_fn, optimizer2, t)
+        results["pretrained"]["train_losses"].append(epoch_loss)
+        results["pretrained"]["train_accs"].append(epoch_acc)
+
+        # Evaluate both models on test set every 3 epochs or on the final epoch
+        if (t + 1) % 3 == 0 or t == epochs - 1:
+            print("\nEvaluating custom CNN model:")
+            test_loss, test_acc = test(test_loader, model1, loss_fn, epoch=t)
+            results["custom_cnn"]["test_losses"].append(test_loss)
+            results["custom_cnn"]["test_accs"].append(test_acc)
+            results["custom_cnn"]["test_epochs"].append(t)
+
+            print("\nEvaluating pre-trained model:")
+            test_loss, test_acc = test(test_loader, model2, loss_fn, epoch=t)
+            results["pretrained"]["test_losses"].append(test_loss)
+            results["pretrained"]["test_accs"].append(test_acc)
+            results["pretrained"]["test_epochs"].append(t)
+
+        # Update schedulers
+        scheduler1.step(results["custom_cnn"]["train_losses"][-1])
+        scheduler2.step(results["pretrained"]["train_losses"][-1])
+
+    return results
+
+
+# Function to plot comparison of model performances
+def plot_model_comparison(results):
+    fig, axes = plt.subplots(2, 2, figsize=(15, 10))
+
+    # Plot training losses
+    axes[0, 0].plot(results["custom_cnn"]["train_losses"], label="Custom CNN")
+    axes[0, 0].plot(results["pretrained"]["train_losses"], label="Pre-trained")
+    axes[0, 0].set_title("Training Loss")
+    axes[0, 0].set_xlabel("Epochs")
+    axes[0, 0].set_ylabel("Loss")
+    axes[0, 0].legend()
+
+    # Plot training accuracies
+    axes[0, 1].plot(results["custom_cnn"]["train_accs"], label="Custom CNN")
+    axes[0, 1].plot(results["pretrained"]["train_accs"], label="Pre-trained")
+    axes[0, 1].set_title("Training Accuracy")
+    axes[0, 1].set_xlabel("Epochs")
+    axes[0, 1].set_ylabel("Accuracy")
+    axes[0, 1].legend()
+
+    # Plot test losses
+    axes[1, 0].plot(
+        results["custom_cnn"]["test_epochs"],
+        results["custom_cnn"]["test_losses"],
+        "o-",
+        label="Custom CNN",
+    )
+    axes[1, 0].plot(
+        results["pretrained"]["test_epochs"],
+        results["pretrained"]["test_losses"],
+        "o-",
+        label="Pre-trained",
+    )
+    axes[1, 0].set_title("Test Loss")
+    axes[1, 0].set_xlabel("Epochs")
+    axes[1, 0].set_ylabel("Loss")
+    axes[1, 0].legend()
+
+    # Plot test accuracies
+    axes[1, 1].plot(
+        results["custom_cnn"]["test_epochs"],
+        results["custom_cnn"]["test_accs"],
+        "o-",
+        label="Custom CNN",
+    )
+    axes[1, 1].plot(
+        results["pretrained"]["test_epochs"],
+        results["pretrained"]["test_accs"],
+        "o-",
+        label="Pre-trained",
+    )
+    axes[1, 1].set_title("Test Accuracy")
+    axes[1, 1].set_xlabel("Epochs")
+    axes[1, 1].set_ylabel("Accuracy")
+    axes[1, 1].legend()
+
+    plt.tight_layout()
+    plt_path = "model_comparison.png"
+    plt.savefig(plt_path)
+    plt.show()
+
+    return plt_path
+
+
+# Replace your existing MLflow training code with this:
 print("Starting training with MLflow tracking...")
 with mlflow.start_run(run_name=config.run_name):
     # Log parameters
@@ -580,6 +745,7 @@ with mlflow.start_run(run_name=config.run_name):
             "num_classes": len(diagnosis_to_idx),
             "class_mapping": diagnosis_to_idx,
             "class_weight_power": config.class_weight_power,
+            "model_comparison": "custom_cnn_vs_pretrained_resnet18",
         }
     )
 
@@ -587,38 +753,101 @@ with mlflow.start_run(run_name=config.run_name):
     class_distribution = filtered_df["dx"].value_counts().to_dict()
     mlflow.log_params({f"class_{k}_count": v for k, v in class_distribution.items()})
 
-    # Train the model with less frequent evaluation
-    train_losses, train_accs, test_losses, test_accs, test_epochs = train_model(
-        model, train_loader, test_loader, optimizer, loss_fn, config.epochs
+    # Train both models and compare
+    results = train_and_compare_models(
+        model,
+        pretrained_model,
+        train_loader,
+        test_loader,
+        optimizer,
+        pretrained_optimizer,
+        scheduler,
+        pretrained_scheduler,
+        loss_fn,
+        config.epochs,
     )
+
     print("Training complete!")
 
-    # Plot and log training progress with sparse test data
-    plt_path = plot_training_progress(
-        train_losses, train_accs, test_losses, test_accs, test_epochs
-    )
-    mlflow.log_artifact(plt_path)
+    # Plot and log comparison results
+    comparison_plt_path = plot_model_comparison(results)
+    mlflow.log_artifact(comparison_plt_path)
 
-    # Save and log the model
+    # Save and log both models
     torch.save(model.state_dict(), config.model_save_path)
-    mlflow.pytorch.log_model(model, "model")
-    mlflow.log_artifact(config.model_save_path)
-    print(f"Model saved to {config.model_save_path} and logged to MLflow")
+    torch.save(pretrained_model.state_dict(), "pretrained_" + config.model_save_path)
 
-    # Log final metrics
+    # Create input examples for signature inference
+    # Get a batch from the dataloader
+    example_inputs, _ = next(iter(train_loader))
+    example_inputs = example_inputs.to(device)
+
+    # Get model outputs for the examples
+    with torch.no_grad():
+        model.eval()
+        example_outputs_cnn = model(example_inputs)
+
+        pretrained_model.eval()
+        example_outputs_pretrained = pretrained_model(example_inputs)
+
+    # Infer signatures
+    cnn_signature = infer_signature(
+        example_inputs.cpu().numpy(), example_outputs_cnn.cpu().numpy()
+    )
+
+    pretrained_signature = infer_signature(
+        example_inputs.cpu().numpy(), example_outputs_pretrained.cpu().numpy()
+    )
+
+    # Log models with signatures and input examples
+    mlflow.pytorch.log_model(
+        model,
+        "custom_cnn_model",
+        signature=cnn_signature,
+        input_example=example_inputs.cpu().numpy(),
+    )
+
+    mlflow.pytorch.log_model(
+        pretrained_model,
+        "pretrained_model",
+        signature=pretrained_signature,
+        input_example=example_inputs.cpu().numpy(),
+    )
+
+    mlflow.log_artifact(config.model_save_path)
+    mlflow.log_artifact("pretrained_" + config.model_save_path)
+
+    print("Models saved and logged to MLflow")
+
+    # Log final metrics for both models
     mlflow.log_metrics(
         {
-            "final_train_loss": train_losses[-1],
-            "final_train_accuracy": train_accs[-1],
-            "final_test_loss": test_losses[-1],
-            "final_test_accuracy": test_accs[-1],
+            "custom_cnn_final_train_loss": results["custom_cnn"]["train_losses"][-1],
+            "custom_cnn_final_train_accuracy": results["custom_cnn"]["train_accs"][-1],
+            "custom_cnn_final_test_loss": results["custom_cnn"]["test_losses"][-1],
+            "custom_cnn_final_test_accuracy": results["custom_cnn"]["test_accs"][-1],
+            "pretrained_final_train_loss": results["pretrained"]["train_losses"][-1],
+            "pretrained_final_train_accuracy": results["pretrained"]["train_accs"][-1],
+            "pretrained_final_test_loss": results["pretrained"]["test_losses"][-1],
+            "pretrained_final_test_accuracy": results["pretrained"]["test_accs"][-1],
         }
     )
 
-print("MLflow tracking completed")
+    # Determine which model performed better
+    if results["custom_cnn"]["test_accs"][-1] > results["pretrained"]["test_accs"][-1]:
+        better_model = "custom_cnn"
+        better_model_path = config.model_save_path
+    else:
+        better_model = "pretrained"
+        better_model_path = "pretrained_" + config.model_save_path
+
+    mlflow.log_param("better_model", better_model)
+    print(
+        f"The {better_model} model performed better with test accuracy: {max(results[better_model]['test_accs'][-1], results[better_model]['test_accs'][-1]):.4f}"
+    )
 
 
-# Modify the save function to only export to ONNX format
+# Define the save_as_onnx function
 def save_as_onnx(model, input_shape, base_filename="skin_lesion_model"):
     # Create a timestamp for unique filename
     timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -650,16 +879,41 @@ def save_as_onnx(model, input_shape, base_filename="skin_lesion_model"):
     return onnx_path
 
 
-# Save the model in ONNX format
-onnx_path = save_as_onnx(model, config.image_size)
+print("MLflow tracking completed")
+
+# Export the better model to ONNX
+better_model_obj = model if better_model == "custom_cnn" else pretrained_model
+onnx_path = save_as_onnx(
+    better_model_obj, config.image_size, base_filename=f"skin_lesion_{better_model}"
+)
 
 if onnx_path:
-    print(f"Model saved in ONNX format at: {onnx_path}")
+    print(f"Better model saved in ONNX format at: {onnx_path}")
 
     # Log the ONNX model to MLflow
     try:
-        with mlflow.start_run(run_name=f"{config.run_name}_onnx_export"):
-            mlflow.log_artifact(onnx_path)
-            print("ONNX model logged to MLflow")
+        # Get example inputs for signature
+        example_inputs, _ = next(iter(train_loader))
+        example_inputs = example_inputs.to(device)
+
+        # Get model outputs
+        with torch.no_grad():
+            better_model_obj.eval()
+            example_outputs = better_model_obj(example_inputs)
+
+        # Infer signature
+        signature = infer_signature(
+            example_inputs.cpu().numpy(), example_outputs.cpu().numpy()
+        )
+
+        with mlflow.start_run(run_name=f"{config.run_name}_{better_model}_onnx_export"):
+            # Log the ONNX model with signature
+            mlflow.onnx.log_model(
+                onnx_model=onnx_path,
+                artifact_path="onnx_model",
+                signature=signature,
+                input_example=example_inputs.cpu().numpy(),
+            )
+            print("ONNX model logged to MLflow with signature")
     except Exception as e:
         print(f"Could not log ONNX model to MLflow: {e}")

@@ -12,3 +12,12 @@ skin_lesion_model.pth
 
 dataset
 data
+pretrained_skin_lesion_model.pth
+
+*.pth
+*.pt
+*.png
+*.jpg
+*.jpeg
+*.gif
+*.bmp
