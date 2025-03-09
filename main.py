@@ -5,9 +5,9 @@ import numpy as np
 # Import from our modules
 from config_loader import load_config
 from preprocessing import prepare_data
-from model_setup import setup_models
+from models import setup_models
 from training import train_and_compare_models
-from experiment import log_parameters, log_training_results, export_best_model
+from utils import log_parameters, log_training_results, save_model
 
 
 def main():
@@ -47,6 +47,10 @@ def main():
     pretrained_scheduler = model_setup["pretrained_scheduler"]
     loss_fn = model_setup["loss_fn"]
 
+    # Get model save format from config (default to "pth" if not specified)
+    model_save_format = getattr(config, "model_save_format", "pth")
+    print(f"Using model save format: {model_save_format}")
+
     # Start MLflow run and train the models
     with mlflow.start_run(run_name=config.run_name):
         # Log parameters
@@ -73,11 +77,22 @@ def main():
 
         # Log results and determine the better model
         better_model, better_model_obj = log_training_results(
-            results, model, pretrained_model, config, train_loader, device
+            results,
+            model,
+            pretrained_model,
+            config,
+            train_loader,
+            device,
+            save_format=model_save_format,
         )
 
-        # Export the better model to ONNX
-        export_best_model(better_model, better_model_obj, config, device)
+        # Export the better model in the specified format
+        save_model(
+            better_model,
+            config,
+            device,
+            model_type=model_save_format,
+        )
 
     print("Training and evaluation completed!")
 

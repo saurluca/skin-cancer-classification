@@ -25,7 +25,8 @@ This project uses the HAM10000 dataset ("Human Against Machine with 10000 traini
 - Pre-trained model implementation using ResNet18
 - Model comparison and performance visualization
 - MLflow integration for experiment tracking
-- Model export to ONNX format for deployment
+- Model export to ONNX or PyTorch format for deployment
+- YAML-based configuration for easy parameter adjustments
 
 ## Setup and Installation
 
@@ -63,36 +64,51 @@ The script will:
 1. Load and preprocess the image data
 2. Train both a custom CNN and a pre-trained model
 3. Compare their performance
-4. Save the models in both PyTorch and ONNX formats
+4. Save the models in either PyTorch or ONNX format (configurable)
 5. Log experiments to MLflow
 
 ## Configuration
 
-Model and training parameters can be configured in `config.py`. Key parameters include:
+Model and training parameters can be configured in `config.yaml`. Key parameters include:
 - Batch size
 - Image dimensions
 - Network architecture (number of layers, features)
 - Learning rate and other optimization parameters
 - Dataset paths
+- Model save format (pth or onnx)
+
+Example configuration:
+```yaml
+# Model parameters
+conv_channels: [32, 64, 128, 256]
+fc_features: [512, 256, 128]
+
+# Training parameters
+learning_rate: 5.0e-4
+epochs: 10
+
+# Model saving format (options: "pth" or "onnx")
+model_save_format: "onnx"
+```
 
 ## Results
 
 The training process produces:
 - Trained model weights saved in the `models/` directory
 - Visualization of training/testing loss and accuracy
-- ONNX model exports for deployment
+- Model exports for deployment (PyTorch or ONNX format)
 - MLflow experiment logs for tracking performance
 
 ## Project Structure
 
 - `main.py` - Main script to run the training and evaluation pipeline
-- `config.py` - Configuration parameters
-- `models.py` - Model architecture definitions
+- `config.yaml` - Configuration parameters in YAML format
+- `config_loader.py` - Utility for loading YAML configuration
+- `models.py` - Model architecture definitions and setup
 - `preprocessing.py` - Data loading, preprocessing, and dataset management functions
 - `training.py` - Training and evaluation functions
-- `utils.py` - Utility functions for model saving and MLflow integration
+- `utils.py` - General utility functions
 - `visualization.py` - Functions for plotting and visualizing results
-- `model_setup.py` - Model, optimizer, and scheduler initialization 
 - `experiment.py` - MLflow experiment tracking and model export
 
 ## Roadmap

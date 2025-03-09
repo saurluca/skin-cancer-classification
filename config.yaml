@@ -24,6 +24,9 @@ model_save_path: "skin_lesion_model.pth"
 csv_path: "data/HAM10000_metadata.csv"
 images_dir: "data/images"
 
+# Model saving format (options: "pth" or "onnx")
+model_save_format: "onnx"
+
 # MLflow parameters
 experiment_name: "skin-lesion-classification"
 run_name: "cnn-model" 

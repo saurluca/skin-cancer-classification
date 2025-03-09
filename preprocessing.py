@@ -6,30 +6,6 @@ from torch.utils.data import Dataset, DataLoader, random_split
 from PIL import Image
 
 
-def get_image_path(img_id, config):
-    """Get the path to an image file."""
-    path = os.path.join(config.images_dir, f"{img_id}.jpg")
-    if os.path.exists(path):
-        return path
-    return None
-
-
-def load_images(df, diagnosis_to_idx, config):
-    """Load images and labels from the dataframe."""
-    image_paths = []
-    labels = []
-
-    for idx, row in df.iterrows():
-        img_id = row["image_id"]
-        path = get_image_path(img_id, config)
-        if path:
-            image_paths.append(path)
-            labels.append(diagnosis_to_idx[row["dx"]])
-
-    print(f"Found {len(image_paths)} valid images out of {len(df)} entries")
-    return image_paths, labels
-
-
 class SkinLesionDataset(Dataset):
     """Dataset for skin lesion images."""
 
@@ -83,6 +59,30 @@ class SkinLesionDataset(Dataset):
             image = self.transform(image)
 
         return image, label
+
+
+def get_image_path(img_id, config):
+    """Get the path to an image file."""
+    path = os.path.join(config.images_dir, f"{img_id}.jpg")
+    if os.path.exists(path):
+        return path
+    return None
+
+
+def load_images(df, diagnosis_to_idx, config):
+    """Load images and labels from the dataframe."""
+    image_paths = []
+    labels = []
+
+    for idx, row in df.iterrows():
+        img_id = row["image_id"]
+        path = get_image_path(img_id, config)
+        if path:
+            image_paths.append(path)
+            labels.append(diagnosis_to_idx[row["dx"]])
+
+    print(f"Found {len(image_paths)} valid images out of {len(df)} entries")
+    return image_paths, labels
 
 
 def create_class_balanced_sampler(dataset, config):
