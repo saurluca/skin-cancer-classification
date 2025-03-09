@@ -31,22 +31,18 @@ This project uses the HAM10000 dataset ("Human Against Machine with 10000 traini
 
 1. Clone the repository:
    ```
-   git clone [repository-url]
+   git clone git@github.com:saurluca/skin-cancer-classification.git
    cd ml-skin-cancer
    ```
 
-2. Create and activate a virtual environment:
+2. Install the required dependencies using uv:
+[uv docs](https://docs.astral.sh/uv/getting-started/installation/)
    ```
-   python -m venv .venv
-   source .venv/bin/activate  # On Windows: .venv\Scripts\activate
-   ```
-
-3. Install the required dependencies:
-   ```
-   pip install -r requirements.txt
+   uv sync
    ```
 
-4. Download the HAM10000 dataset from Kaggle and place it in the following structure:
+
+3. Download the HAM10000 dataset from Kaggle and place it in the following structure:
    ```
    data/
    ├── HAM10000_metadata.csv
@@ -60,7 +56,7 @@ This project uses the HAM10000 dataset ("Human Against Machine with 10000 traini
 Run the main script to train and evaluate the models:
 
 ```
-python main.py
+uv run main.py
 ```
 
 The script will:
