@@ -1,258 +1,310 @@
+import torch
+import torch.nn as nn
+import torch.optim as optim
+from torch.utils.data import DataLoader, random_split
+import torchvision.transforms as transforms
+import mlflow
+from mlflow.models.signature import infer_signature
 import pandas as pd
-import os
-import cv2
-from ultralytics import YOLO
-from sklearn.model_selection import train_test_split
-from pathlib import Path
+import numpy as np
 
-
-# Function to load images
-def load_images(image_ids, image_dirs):
-    images = []
-    not_found = []
-
-    for img_id in image_ids:
-        img_filename = img_id + ".jpg"
-        found = False
-
-        # Try to find the image in any of the directories
-        for img_dir in image_dirs:
-            img_path = os.path.join(img_dir, img_filename)
-            if os.path.exists(img_path):
-                img = cv2.imread(img_path)
-                img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
-                images.append(img)
-                found = True
-                break
-
-        if not found:
-            not_found.append(img_id)
-
-    if not_found:
-        print(f"Warning: Could not find {len(not_found)} images")
-        if (
-            len(not_found) < 10
-        ):  # Only print a few missing IDs to avoid cluttering output
-            print(f"Missing image IDs: {not_found}")
-        else:
-            print(f"First 10 missing image IDs: {not_found[:10]}...")
-
-    return images
-
-
-# Function to load a small test dataset (10 images per class)
-def load_test_dataset(df, image_dirs, sample_size=10):
-    print(f"\nLoading test dataset with {sample_size} images per class...")
-
-    # Get a balanced sample of images from each class
-    classes = df["dx"].unique()
-    sampled_df = pd.DataFrame()
-
-    for class_name in classes:
-        class_df = df[df["dx"] == class_name].head(sample_size)
-        sampled_df = pd.concat([sampled_df, class_df])
-
-    # Load the images
-    sampled_images = load_images(sampled_df["image_id"].tolist(), image_dirs)
-
-    print(f"Successfully loaded {len(sampled_images)} test images")
-
-    # Split data for training and validation
-    train_df, val_df = train_test_split(sampled_df, test_size=0.2, random_state=42)
-    test_df = sampled_df.sample(min(sample_size, len(sampled_df)), random_state=42)
-
-    return train_df, val_df, test_df, sampled_images
-
-
-# Function to load the full dataset
-def load_full_dataset(df, image_dirs):
-    print("\nLoading full dataset...")
-
-    # Load all images
-    all_images = load_images(df["image_id"].tolist(), image_dirs)
-
-    print(f"Successfully loaded {len(all_images)} images out of {len(df)} records")
-
-    # Split data for training and validation
-    train_df, val_df = train_test_split(df, test_size=0.2, random_state=42)
-    test_df = df.sample(
-        min(100, len(df)), random_state=42
-    )  # Use 100 images for testing
-
-    return train_df, val_df, test_df, all_images
-
-
-# Function to save images for classification (organized by class)
-def save_images_for_classification(df, split, images_list, images_dir):
-    saved_count = 0
-    for i, row in df.iterrows():
-        img_id = row["image_id"]
-        class_name = row["dx"]  # Get the class name from the dx column
-
-        # Find the image in the loaded images
-        img_index = df.index.get_loc(i)
-        if img_index < len(images_list):
-            img = images_list[img_index]
-
-            # Create class directory if it doesn't exist
-            class_dir = images_dir / split / class_name
-            class_dir.mkdir(parents=True, exist_ok=True)
-
-            # Save image in the class directory
-            img_path = class_dir / f"{img_id}.jpg"
-            cv2.imwrite(str(img_path), cv2.cvtColor(img, cv2.COLOR_RGB2BGR))
-            saved_count += 1
-
-    return saved_count
+# Import from our modules
+from config import ModelConfig
+from preprocessing import load_images, SkinLesionDataset, create_class_balanced_sampler
+from models import CNNModel, PretrainedModel
+from training import train_and_compare_models
+from visualization import plot_model_comparison
+from utils import save_as_onnx, save_pytorch_model, log_model_to_mlflow
 
 
 def main():
-    # Download latest version
-    # path = kagglehub.dataset_download("kmader/skin-cancer-mnist-ham10000")
-    path = "/home/luca/.cache/kagglehub/datasets/kmader/skin-cancer-mnist-ham10000/versions/2"
+    # Initialize configuration
+    config = ModelConfig()
 
-    print("Path to dataset files:", path)
+    # Set up MLflow experiment
+    mlflow.set_experiment(config.experiment_name)
 
-    df = pd.read_csv(os.path.join(path, "HAM10000_metadata.csv"))
+    # Set seeds for reproducibility
+    np.random.seed(42)
+    torch.manual_seed(42)
 
-    # Define all possible image directory paths (both uppercase and lowercase variants)
-    image_dirs = [
-        os.path.join(path, "HAM10000_images_part_1"),
-        os.path.join(path, "HAM10000_images_part_2"),
-        os.path.join(path, "ham10000_images_part_1"),
-        os.path.join(path, "ham10000_images_part_2"),
-    ]
+    # Check if the CSV file exists
+    try:
+        df = pd.read_csv(config.csv_path)
+        print(f"Loaded {len(df)} rows from {config.csv_path}")
+    except FileNotFoundError:
+        print(f"Error: CSV file not found at {config.csv_path}")
+        return
 
-    # Filter out directories that don't exist
-    image_dirs = [dir_path for dir_path in image_dirs if os.path.exists(dir_path)]
-
-    print(f"Found {len(image_dirs)} image directories:")
-    for dir_path in image_dirs:
-        print(f"  - {dir_path}")
-
-    # Check for additional data files
-    additional_files = [
-        "hmnist_28_28_RGB.csv",
-        "hmnist_28_28_L.csv",
-        "hmnist_8_8_L.csv",
-        "hmnist_8_8_RGB.csv",
-    ]
-
-    print("\nChecking for additional data files:")
-    for file_name in additional_files:
-        file_path = os.path.join(path, file_name)
-        if os.path.exists(file_path):
-            print(f"  - {file_name}: Found")
-        else:
-            print(f"  - {file_name}: Not found")
-
-    # Choose which dataset to use
-    USE_TEST_DATASET = True  # Set to False to use the full dataset
-    TEST_SAMPLE_SIZE = 10
-
-    if USE_TEST_DATASET:
-        train_df, val_df, test_df, images = load_test_dataset(
-            df, image_dirs, TEST_SAMPLE_SIZE
-        )
+    # Create a mapping from diagnosis to numerical label
+    if "dx" in df.columns:
+        unique_diagnoses = df["dx"].unique()
+        diagnosis_to_idx = {
+            diagnosis: idx for idx, diagnosis in enumerate(unique_diagnoses)
+        }
+        idx_to_diagnosis = {
+            idx: diagnosis for diagnosis, idx in diagnosis_to_idx.items()
+        }
+        print(f"Diagnosis classes: {diagnosis_to_idx}")
     else:
-        train_df, val_df, test_df, images = load_full_dataset(df, image_dirs)
+        print("Error: 'dx' column not found in CSV file")
+        return
 
-    print(f"Train set: {len(train_df)} images")
-    print(f"Validation set: {len(val_df)} images")
-    print(f"Test set: {len(test_df)} images")
+    # Load images and labels
+    image_paths, labels = load_images(df, diagnosis_to_idx, config)
 
-    # Create dataset directories for classification
-    dataset_dir = Path("dataset")
-    images_dir = dataset_dir / "images"
-
-    # Create train/val/test directories
-    for split in ["train", "val", "test"]:
-        (images_dir / split).mkdir(parents=True, exist_ok=True)
-
-    print("Saving training images...")
-    train_saved = save_images_for_classification(train_df, "train", images, images_dir)
-    print(f"Saved {train_saved} training images")
-
-    print("Saving validation images...")
-    val_saved = save_images_for_classification(val_df, "val", images, images_dir)
-    print(f"Saved {val_saved} validation images")
-
-    print("Saving test images...")
-    test_saved = save_images_for_classification(test_df, "test", images, images_dir)
-    print(f"Saved {test_saved} test images")
-
-    # Create data.yaml file
-    data_yaml_path = dataset_dir / "data.yaml"
-    with open(data_yaml_path, "w") as f:
-        f.write(f"""
-path: {dataset_dir.absolute()}
-train: images/train
-val: images/val
-test: images/test
-
-# Classes
-nc: 7  # Number of classes in the HAM10000 dataset
-names: ['akiec', 'bcc', 'bkl', 'df', 'mel', 'nv', 'vasc']  # Class names from HAM10000
-""")
-
-    print("Initializing classification model")
-    # Initialize YOLO classification model instead of detection
-    model = YOLO("yolov8n-cls.pt")  # Load a pretrained YOLOv8 classification model
-
-    # Train the model with the proper data.yaml path
-    results = model.train(
-        data=str(data_yaml_path),  # Use the created YAML file
-        epochs=5,  # Increased for better learning
-        imgsz=224,  # Standard size for classification
-        batch=16,  # Adjusted batch size
-        name="skin_cancer_classifier",
+    # Define image transformations
+    transform = transforms.Compose(
+        [
+            transforms.Resize(config.image_size),
+            transforms.ToTensor(),
+            transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5)),
+        ]
     )
 
-    # Evaluate the model on test data
-    print("\nEvaluating model on test data...")
-    metrics = model.val()
+    # Add data augmentation for minority classes
+    transform_minority = transforms.Compose(
+        [
+            transforms.Resize((config.image_size[0] + 4, config.image_size[1] + 4)),
+            transforms.RandomHorizontalFlip(),
+            transforms.RandomRotation(20),
+            transforms.ColorJitter(brightness=0.1, contrast=0.1, saturation=0.1),
+            transforms.Resize(config.image_size),
+            transforms.ToTensor(),
+            transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5)),
+        ]
+    )
 
-    print("\nClassification Results:")
-    print(f"Accuracy: {metrics.top1:.4f}")
-    print(f"Top-5 Accuracy: {metrics.top5:.4f}")
+    # Create the dataset
+    dataset = SkinLesionDataset(
+        image_paths,
+        labels,
+        transform=transform,
+        transform_minority=transform_minority,
+        diagnosis_to_idx=diagnosis_to_idx,
+    )
 
-    # Perform inference on a few test images
-    test_images_list = list(images_dir.glob("test/*.jpg"))
-    if test_images_list:
-        print("\nRunning inference on test images...")
-        # Get ground truth labels
-        test_labels = test_df["dx"].tolist()
+    # Split into train and test sets
+    train_size = int(config.train_split * len(dataset))
+    test_size = len(dataset) - train_size
+    train_dataset, test_dataset = random_split(dataset, [train_size, test_size])
 
-        # Run inference on test images
-        predictions = []
-        for i, img_path in enumerate(
-            test_images_list[:10]
-        ):  # Just use first 10 for demo
-            result = model(str(img_path))
-            pred_class = result[0].probs.top1
-            pred_class_name = result[0].names[pred_class]
-            true_class = test_labels[i] if i < len(test_labels) else "unknown"
+    print(f"Training set size: {len(train_dataset)}")
+    print(f"Test set size: {len(test_dataset)}")
 
-            predictions.append((true_class, pred_class_name))
-            print(f"Image {i + 1}: True: {true_class}, Predicted: {pred_class_name}")
+    # Create a balanced sampler for training
+    train_sampler = create_class_balanced_sampler(train_dataset, config)
 
-        # Calculate classification error
-        correct = sum(1 for true, pred in predictions if true == pred)
-        total = len(predictions)
-        error_rate = 1.0 - (correct / total) if total > 0 else 0
+    # Create data loaders
+    train_loader = DataLoader(
+        train_dataset, batch_size=config.batch_size, sampler=train_sampler
+    )
+    test_loader = DataLoader(test_dataset, batch_size=config.batch_size, shuffle=False)
 
-        print(
-            f"\nClassification Error: {error_rate:.4f} ({total - correct} incorrect out of {total})"
+    # Set device for training
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    print(f"Using {device} device", "\n")
+
+    # Create the custom CNN model
+    model = CNNModel(config, len(diagnosis_to_idx)).to(device)
+    print(model)
+
+    # Define loss function with class weights if needed
+    loss_fn = nn.CrossEntropyLoss()
+
+    # Create optimizer and scheduler
+    optimizer = optim.Adam(
+        model.parameters(), lr=config.learning_rate, weight_decay=config.weight_decay
+    )
+    scheduler = optim.lr_scheduler.ReduceLROnPlateau(
+        optimizer,
+        mode="min",
+        factor=config.scheduler_factor,
+        patience=config.scheduler_patience,
+    )
+
+    # Create the pre-trained model
+    pretrained_model = PretrainedModel(
+        len(diagnosis_to_idx), pretrained_model="resnet18"
+    ).to(device)
+    print("Pre-trained model architecture:")
+    print(pretrained_model)
+
+    # Create optimizer and scheduler for the pre-trained model
+    pretrained_optimizer = optim.Adam(
+        pretrained_model.parameters(),
+        lr=config.learning_rate,
+        weight_decay=config.weight_decay,
+    )
+    pretrained_scheduler = optim.lr_scheduler.ReduceLROnPlateau(
+        pretrained_optimizer,
+        mode="min",
+        factor=config.scheduler_factor,
+        patience=config.scheduler_patience,
+    )
+
+    # Start MLflow run and train the models
+    with mlflow.start_run(run_name=config.run_name) as run:
+        # Log parameters
+        mlflow.log_params(
+            {
+                "batch_size": config.batch_size,
+                "image_size": config.image_size,
+                "learning_rate": config.learning_rate,
+                "weight_decay": config.weight_decay,
+                "epochs": config.epochs,
+                "conv_channels": config.conv_channels,
+                "fc_features": config.fc_features,
+                "dropout_rates_conv": config.dropout_rates_conv,
+                "dropout_rates_fc": config.dropout_rates_fc,
+                "scheduler_factor": config.scheduler_factor,
+                "scheduler_patience": config.scheduler_patience,
+                "train_split": config.train_split,
+                "num_classes": len(diagnosis_to_idx),
+                "class_mapping": diagnosis_to_idx,
+                "class_weight_power": config.class_weight_power,
+                "model_comparison": "custom_cnn_vs_pretrained_resnet18",
+            }
         )
-        print(
-            f"Classification Accuracy: {1 - error_rate:.4f} ({correct} correct out of {total})"
+
+        # Log class distribution
+        class_distribution = df["dx"].value_counts().to_dict()
+        mlflow.log_params(
+            {f"class_{k}_count": v for k, v in class_distribution.items()}
         )
 
-        # Save a visualization of results
-        result = model(str(test_images_list[0]))
-        result[0].save("classification_result.jpg")
-    else:
-        print("No test images available for inference")
+        # Train both models and compare
+        results = train_and_compare_models(
+            model,
+            pretrained_model,
+            train_loader,
+            test_loader,
+            optimizer,
+            pretrained_optimizer,
+            scheduler,
+            pretrained_scheduler,
+            loss_fn,
+            config.epochs,
+            device,
+            idx_to_diagnosis,
+            diagnosis_to_idx,
+        )
+
+        print("Training complete!")
+
+        # Plot and log comparison results
+        comparison_plt_path = plot_model_comparison(results)
+        mlflow.log_artifact(comparison_plt_path)
+
+        # Save both models using the utilities
+        save_pytorch_model(model, config.model_save_path)
+        save_pytorch_model(pretrained_model, "pretrained_" + config.model_save_path)
+
+        # Create input examples for signature inference
+        example_inputs, _ = next(iter(train_loader))
+        example_inputs = example_inputs.to(device)
+
+        with torch.no_grad():
+            model.eval()
+            example_outputs_cnn = model(example_inputs)
+
+            pretrained_model.eval()
+            example_outputs_pretrained = pretrained_model(example_inputs)
+
+        # Infer signatures
+        cnn_signature = infer_signature(
+            example_inputs.cpu().numpy(), example_outputs_cnn.cpu().numpy()
+        )
+
+        pretrained_signature = infer_signature(
+            example_inputs.cpu().numpy(), example_outputs_pretrained.cpu().numpy()
+        )
+
+        # Log models with signatures and input examples
+        mlflow.pytorch.log_model(
+            model,
+            "custom_cnn_model",
+            signature=cnn_signature,
+            input_example=example_inputs.cpu().numpy(),
+        )
+
+        mlflow.pytorch.log_model(
+            pretrained_model,
+            "pretrained_model",
+            signature=pretrained_signature,
+            input_example=example_inputs.cpu().numpy(),
+        )
+
+        mlflow.log_artifact(config.model_save_path)
+        mlflow.log_artifact("pretrained_" + config.model_save_path)
+
+        print("Models saved and logged to MLflow")
+
+        # Log final metrics for both models
+        mlflow.log_metrics(
+            {
+                "custom_cnn_final_train_loss": results["custom_cnn"]["train_losses"][
+                    -1
+                ],
+                "custom_cnn_final_train_accuracy": results["custom_cnn"]["train_accs"][
+                    -1
+                ],
+                "custom_cnn_final_test_loss": results["custom_cnn"]["test_losses"][-1],
+                "custom_cnn_final_test_accuracy": results["custom_cnn"]["test_accs"][
+                    -1
+                ],
+                "pretrained_final_train_loss": results["pretrained"]["train_losses"][
+                    -1
+                ],
+                "pretrained_final_train_accuracy": results["pretrained"]["train_accs"][
+                    -1
+                ],
+                "pretrained_final_test_loss": results["pretrained"]["test_losses"][-1],
+                "pretrained_final_test_accuracy": results["pretrained"]["test_accs"][
+                    -1
+                ],
+            }
+        )
+
+        # Determine which model performed better
+        if (
+            results["custom_cnn"]["test_accs"][-1]
+            > results["pretrained"]["test_accs"][-1]
+        ):
+            better_model = "custom_cnn"
+            better_model_obj = model
+        else:
+            better_model = "pretrained"
+            better_model_obj = pretrained_model
+
+        mlflow.log_param("better_model", better_model)
+        print(
+            f"The {better_model} model performed better with test accuracy: {results[better_model]['test_accs'][-1]:.4f}"
+        )
+
+        # Export the better model to ONNX
+        onnx_path = save_as_onnx(
+            better_model_obj,
+            config.image_size,
+            device,
+            base_filename=f"skin_lesion_{better_model}",
+        )
+        print(f"Better model saved in ONNX format at: {onnx_path}")
+
+        # Log both PyTorch and ONNX models to MLflow
+        try:
+            # Get example input for inference
+            example_inputs = torch.randn(
+                1, 3, config.image_size[0], config.image_size[1], device=device
+            )
+
+            # Use the consolidated logging function - no need to pass run_id since we're in an active run
+            log_model_to_mlflow(better_model_obj, onnx_path, example_inputs)
+
+        except Exception as e:
+            print(f"Could not log models to MLflow: {e}")
+
+    print("Training and evaluation completed!")
 
 
 if __name__ == "__main__":
