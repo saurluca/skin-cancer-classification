@@ -1,0 +1,29 @@
+# Data parameters
+batch_size: 32
+image_size: [28, 28]
+train_split: 0.8
+
+# Model parameters
+conv_channels: [32, 64, 128, 256]
+fc_features: [512, 256, 128]
+dropout_rates_conv: [0.1, 0.15, 0.2, 0.25]
+dropout_rates_fc: [0.4, 0.3, 0.2]
+
+# Training parameters
+learning_rate: 5.0e-4
+weight_decay: 2.0e-5
+epochs: 1
+scheduler_factor: 0.7
+scheduler_patience: 3
+
+# Class weight parameters
+class_weight_power: 0.3
+
+# Paths
+model_save_path: "skin_lesion_model.pth"
+csv_path: "data/HAM10000_metadata.csv"
+images_dir: "data/images"
+
+# MLflow parameters
+experiment_name: "skin-lesion-classification"
+run_name: "cnn-model" 
