@@ -1,6 +1,8 @@
 import os
 import torch
-from torch.utils.data import Dataset
+import pandas as pd
+import torchvision.transforms as transforms
+from torch.utils.data import Dataset, DataLoader, random_split
 from PIL import Image
 
 
@@ -105,3 +107,87 @@ def create_class_balanced_sampler(dataset, config):
 
     print(f"Created balanced sampler with {len(weights)} weights")
     return sampler
+
+
+def prepare_data(config):
+    """Prepare data for training and evaluation."""
+    # Check if the CSV file exists
+    try:
+        df = pd.read_csv(config.csv_path)
+        print(f"Loaded {len(df)} rows from {config.csv_path}")
+    except FileNotFoundError:
+        print(f"Error: CSV file not found at {config.csv_path}")
+        return None
+
+    # Create a mapping from diagnosis to numerical label
+    if "dx" in df.columns:
+        unique_diagnoses = df["dx"].unique()
+        diagnosis_to_idx = {
+            diagnosis: idx for idx, diagnosis in enumerate(unique_diagnoses)
+        }
+        idx_to_diagnosis = {
+            idx: diagnosis for diagnosis, idx in diagnosis_to_idx.items()
+        }
+        print(f"Diagnosis classes: {diagnosis_to_idx}")
+    else:
+        print("Error: 'dx' column not found in CSV file")
+        return None
+
+    # Load images and labels
+    image_paths, labels = load_images(df, diagnosis_to_idx, config)
+
+    # Define image transformations
+    transform = transforms.Compose(
+        [
+            transforms.Resize(config.image_size),
+            transforms.ToTensor(),
+            transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5)),
+        ]
+    )
+
+    # Add data augmentation for minority classes
+    transform_minority = transforms.Compose(
+        [
+            transforms.Resize((config.image_size[0] + 4, config.image_size[1] + 4)),
+            transforms.RandomHorizontalFlip(),
+            transforms.RandomRotation(20),
+            transforms.ColorJitter(brightness=0.1, contrast=0.1, saturation=0.1),
+            transforms.Resize(config.image_size),
+            transforms.ToTensor(),
+            transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5)),
+        ]
+    )
+
+    # Create the dataset
+    dataset = SkinLesionDataset(
+        image_paths,
+        labels,
+        transform=transform,
+        transform_minority=transform_minority,
+        diagnosis_to_idx=diagnosis_to_idx,
+    )
+
+    # Split into train and test sets
+    train_size = int(config.train_split * len(dataset))
+    test_size = len(dataset) - train_size
+    train_dataset, test_dataset = random_split(dataset, [train_size, test_size])
+
+    print(f"Training set size: {len(train_dataset)}")
+    print(f"Test set size: {len(test_dataset)}")
+
+    # Create a balanced sampler for training
+    train_sampler = create_class_balanced_sampler(train_dataset, config)
+
+    # Create data loaders
+    train_loader = DataLoader(
+        train_dataset, batch_size=config.batch_size, sampler=train_sampler
+    )
+    test_loader = DataLoader(test_dataset, batch_size=config.batch_size, shuffle=False)
+
+    return {
+        "train_loader": train_loader,
+        "test_loader": test_loader,
+        "diagnosis_to_idx": diagnosis_to_idx,
+        "idx_to_diagnosis": idx_to_diagnosis,
+        "df": df,
+    }

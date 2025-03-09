@@ -88,7 +88,13 @@ The training process produces:
 - `main.py` - Main script to run the training and evaluation pipeline
 - `config.py` - Configuration parameters
 - `models.py` - Model architecture definitions
-- `preprocessing.py` - Data loading and preprocessing functions
+- `preprocessing.py` - Data loading, preprocessing, and dataset management functions
 - `training.py` - Training and evaluation functions
 - `utils.py` - Utility functions for model saving and MLflow integration
 - `visualization.py` - Functions for plotting and visualizing results
+- `model_setup.py` - Model, optimizer, and scheduler initialization 
+- `experiment.py` - MLflow experiment tracking and model export
+
+## Roadmap
+
+- [ ] Implement k-fold crossvalidation
