@@ -114,3 +114,4 @@ The training process produces:
 ## Roadmap
 
 - [ ] Implement k-fold crossvalidation
+- [ ] Add support for additional pre-trained models 
